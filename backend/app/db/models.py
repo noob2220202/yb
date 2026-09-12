@@ -108,6 +108,27 @@ class ValueEdge(Base):
     event: Mapped[Event] = relationship()
 
 
+class ParlayValueFind(Base):
+    """A cross-match parlay (다폴더) whose combined price at one bookmaker
+    clears the market's best-available-anywhere fair probability for
+    every leg. NOT arbitrage, NOT guaranteed profit — see
+    app/engine/parlay.py module docstring. Spans multiple events, so
+    (unlike ArbitrageOpportunity/ValueEdge) there's no single event_id;
+    each leg's own event is denormalized into ``legs_json`` instead.
+    """
+
+    __tablename__ = "parlay_value_finds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bookmaker: Mapped[str] = mapped_column(String(64))
+    combined_odds: Mapped[float] = mapped_column(Float)
+    combined_fair_probability: Mapped[float] = mapped_column(Float)
+    edge_percent: Mapped[float] = mapped_column(Float)
+    legs_json: Mapped[str] = mapped_column(Text)
+    # JSON list of {event_label, market, line, selection, decimal_odds, fair_probability}
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class User(Base):
     __tablename__ = "users"
 

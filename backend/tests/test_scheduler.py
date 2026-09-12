@@ -6,10 +6,12 @@ import pytest
 import app.scheduler as scheduler_module
 from app.core.enums import MarketType, Sport
 from app.core.schemas import OddsQuote
-from app.db.models import ArbitrageOpportunity, Event, ValueEdge
+from app.db.models import ArbitrageOpportunity, Event, ParlayValueFind, ValueEdge
 from app.engine.scanner import run_scan_cycle
 from app.notifications.telegram import (
     format_digest,
+    format_parlay_box,
+    format_parlay_digest,
     format_pick_box,
     format_value_edge_box,
     format_value_edge_digest,
@@ -70,6 +72,37 @@ def make_value_edge(
     )
 
 
+def make_parlay_find(edge_percent: float = 10.0, bookmaker: str = "Soft") -> ParlayValueFind:
+    legs = [
+        {
+            "event_label": "A vs B",
+            "market": "moneyline_2way",
+            "line": None,
+            "selection": "home",
+            "bookmaker": bookmaker,
+            "decimal_odds": 2.10,
+            "fair_probability": 0.5,
+        },
+        {
+            "event_label": "C vs D",
+            "market": "totals",
+            "line": 2.5,
+            "selection": "over",
+            "bookmaker": bookmaker,
+            "decimal_odds": 1.95,
+            "fair_probability": 0.55,
+        },
+    ]
+    return ParlayValueFind(
+        bookmaker=bookmaker,
+        combined_odds=2.10 * 1.95,
+        combined_fair_probability=0.5 * 0.55,
+        edge_percent=edge_percent,
+        legs_json=json.dumps(legs),
+        detected_at=datetime.now(timezone.utc),
+    )
+
+
 # ---------------------------------------------------------------------
 # _collect_quotes: merging across providers
 # ---------------------------------------------------------------------
@@ -103,7 +136,7 @@ async def test_merged_quotes_enable_cross_provider_arbitrage(db_session, monkeyp
     )
 
     quotes = await scheduler_module._collect_quotes([Sport.SOCCER])
-    opportunities, _ = await run_scan_cycle(db_session, quotes, source="test")
+    opportunities, _, _ = await run_scan_cycle(db_session, quotes, source="test")
 
     assert len(opportunities) == 1
     assert opportunities[0].margin_percent > 0
@@ -373,6 +406,107 @@ async def test_notify_value_edges_noop_when_telegram_not_configured(db_session, 
     await db_session.flush()
 
     await scheduler_module._notify_new_value_edges(db_session, [edge])
+    assert called is False
+
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------
+# _notify_new_parlay_finds: same pattern, third channel/threshold for
+# 다폴더 (cross-match parlay) value finds.
+# ---------------------------------------------------------------------
+
+
+def test_format_parlay_box_contains_every_leg_and_combined_price():
+    find = make_parlay_find(edge_percent=12.3)
+    text = format_parlay_box(1, find)
+    assert "A vs B" in text and "C vs D" in text
+    assert "Soft" in text
+    assert f"{find.combined_odds:.2f}" in text
+    assert "+12.3%" in text
+
+
+def test_format_parlay_digest_marks_not_guaranteed():
+    text = format_parlay_digest(["box-one"])
+    assert "확정" in text and "아님" in text
+    assert "box-one" in text
+
+
+@pytest.mark.asyncio
+async def test_notify_parlay_finds_dedupes_still_active(db_session, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    sent = []
+
+    async def fake_send(text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
+    scheduler_module._notified_parlay_keys.clear()
+
+    find = make_parlay_find(edge_percent=15.0)
+
+    await scheduler_module._notify_new_parlay_finds(db_session, [find])
+    assert len(sent) == 1
+
+    await scheduler_module._notify_new_parlay_finds(db_session, [find])
+    assert len(sent) == 1  # 같은 조합이 그대로면 재알림하지 않는다
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_notify_parlay_finds_skips_below_edge_threshold(db_session, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+    monkeypatch.setenv("TELEGRAM_MIN_PARLAY_EDGE_PERCENT", "20.0")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    sent = []
+
+    async def fake_send(text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
+    scheduler_module._notified_parlay_keys.clear()
+
+    find = make_parlay_find(edge_percent=10.0)  # 20% 임계값 미달
+
+    await scheduler_module._notify_new_parlay_finds(db_session, [find])
+    assert sent == []
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_notify_parlay_finds_noop_when_telegram_not_configured(db_session, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    called = False
+
+    async def fake_send(text):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
+    scheduler_module._notified_parlay_keys.clear()
+
+    find = make_parlay_find(edge_percent=50.0)
+
+    await scheduler_module._notify_new_parlay_finds(db_session, [find])
     assert called is False
 
     get_settings.cache_clear()

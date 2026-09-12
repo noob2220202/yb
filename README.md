@@ -14,6 +14,11 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
    provider — see "피나클만 쓰는 경우" below). **Neither is guaranteed
    profit**, it's a ranked shortlist of positive-EV bets (see caveat
    below).
+3. **Parlay (다폴더) value picks** — cross-match combos (never same-game)
+   whose combined price at one bookmaker beats the market's best-available
+   fair probability for every leg. Same "value, not guaranteed" family as
+   above; the dashboard/API/Telegram mix single-leg and multi-leg finds
+   into one ranked feed. See "다폴더(파레이) 가치 픽" below.
 
 ## Read this before you rely on it
 
@@ -75,6 +80,30 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
 정확히 이런 불일치를 최소화하도록 운영되는 북메이커라 발견 빈도는 낮을 것으로
 예상됩니다** — 그게 정상입니다.
 
+## 다폴더(파레이) 가치 픽
+
+`app/engine/parlay.py`가 서로 다른 경기를 묶은 전통적 크로스매치 파레이만
+다룹니다 (같은 경기 내 마켓을 묶는 세임게임 파레이는 다리끼리 상관관계가
+생겨서 별도 모델링이 필요해 의도적으로 빠졌습니다). 방식:
+
+1. 각 다리의 "공정 확률"은 **그 마켓에서 어디서든 구할 수 있는 최고 배당**을
+   proportional devig해서 구합니다 (특정 북메이커 자체 확률이 아님).
+2. 파레이 **가격**은 항상 **한 북메이커 자신의** 다리별 배당을 곱한 값입니다 —
+   실제 파레이 티켓은 한 북메이커에서만 넣을 수 있으니까요 (곱셈 방식,
+   실제 파레이 API 가격은 안 가져옴).
+3. `공정확률 곱 × 그 북메이커의 파레이 배당 − 1`이 임계값(기본 5%) 이상이면
+   "가치 있는 다폴더"로 표시.
+
+한 북메이커만 있으면(피나클만 쓰는 경우) 이 스캐너도 절대 발견이 안 됩니다 —
+자기 자신의 배당으로 자기 자신의 공정확률을 만들면 항상 자기 마진만큼
+손해로 나오기 때문입니다 (단폴더 아비트리지가 북메이커 2개 필요한 것과
+같은 이유). Odds API를 붙이면(위 권장 경로) 자동으로 작동합니다.
+
+**안 만든 것**: 다폴더끼리, 혹은 다폴더+단폴더를 조합해서 결과와 무관하게
+확정 수익이 나도록 헤지하는 기능. 이건 2^N개의 상호보완적 파레이 조합을
+전부 커버하거나, 사용자가 실제로 넣은 특정 베팅을 추적해야 하는 별도의
+(훨씬 복잡한) 기능이라 이번엔 범위에서 뺐습니다.
+
 ## Architecture
 
 ```
@@ -88,7 +117,8 @@ backend/            FastAPI service
   app/engine/
     arbitrage.py       Core N-outcome arbitrage math + stake allocator
     scoreline_model.py Poisson/Dixon-Coles calibration + value-edge finder
-    scanner.py         Orchestrates persistence + both scans per poll cycle
+    parlay.py          Cross-match parlay (다폴더) value scanner
+    scanner.py         Orchestrates persistence + all three scans per poll cycle
   app/db/             SQLAlchemy models (async, Postgres in prod / SQLite in tests)
   app/api/            REST routes, API-key auth
   app/scheduler.py     APScheduler polling loop — merges every configured
@@ -111,6 +141,9 @@ docker-compose.yml    postgres + backend + frontend (선택사항 — 로컬은 
 
 각 아비트리지 기회는 표가 아니라 **픽 박스**(카드)로 표시되어 이벤트·마켓·마진·다리별
 배당을 한눈에 보여주고, 새로 감지된 픽은 잠깐 민트색 테두리로 하이라이트됩니다.
+"가치 픽" 섹션은 단폴더 가치 엣지와 다폴더 가치 픽을 엣지% 기준 하나의 피드로
+섞어서 보여줍니다 — 다리가 1개면 기존 카드, 여러 개면 다리별 칩이 늘어난 카드로
+표시됩니다.
 우측 상단 "🔔 알림 켜기"를 누르면 브라우저 권한을 요청하고, 이후 설정한 마진(%) 이상의
 확정픽이 새로 뜰 때마다 OS 알림 + 소리(사인파 차임, 별도 음원 파일 불필요)로 알려줍니다.
 임계값은 브라우저 `localStorage`에 저장됩니다.
@@ -256,12 +289,13 @@ empty dashboard.
 ```
 TELEGRAM_BOT_TOKEN=<@BotFather 로 발급받은 토큰>
 TELEGRAM_CHAT_ID=<봇과 대화한 채팅 ID>
-TELEGRAM_MIN_MARGIN_PERCENT=1.0   # 확정 수익 픽: 이 마진(%) 이상만 알림
-TELEGRAM_MIN_EDGE_PERCENT=3.0     # 가치 베팅 엣지: 이 모델 엣지(%) 이상만 알림
+TELEGRAM_MIN_MARGIN_PERCENT=1.0        # 확정 수익 픽: 이 마진(%) 이상만 알림
+TELEGRAM_MIN_EDGE_PERCENT=3.0          # 단폴더 가치 엣지: 이 모델 엣지(%) 이상만 알림
+TELEGRAM_MIN_PARLAY_EDGE_PERCENT=8.0   # 다폴더 가치 픽: 다리가 여러 개라 임계값을 더 높게
 ```
 
 매 폴링 사이클마다 **새로 나타난** 것만(이미 알림을 보낸, 여전히 살아있는 픽/엣지는
-재알림하지 않음) 박스별로 정리해 채널 두 개로 나눠 보냅니다:
+재알림하지 않음) 박스별로 정리해 채널 세 개로 나눠 보냅니다:
 
 ```
 🎯 확정 수익 픽 2건 발견
@@ -284,17 +318,30 @@ TELEGRAM_MIN_EDGE_PERCENT=3.0     # 가치 베팅 엣지: 이 모델 엣지(%) �
 Pinnacle @ 4.72  (모델 엣지 +35.0%)
 ```
 
-피나클만 설정한 경우 위쪽 채널은 거의 항상 비어 있고(정상입니다 — "피나클만 쓰는
-경우" 참고), 아래쪽 채널이 실질적으로 계속 오는 알림이 됩니다.
+```
+🧩 다폴더 가치 픽 1건 발견 (확정 수익 아님)
+
+[1] SoftBook · 3다리 다폴더
+  ▸ Arsenal vs Chelsea: home @ SoftBook  2.30
+  ▸ Man City vs Newcastle: home @ SoftBook  2.30
+  ▸ Liverpool vs Spurs: home @ SoftBook  2.30
+합산 배당 12.17  (모델 엣지 +17.5%)
+```
+
+피나클만 설정한 경우 첫 번째 채널은 거의 항상 비어 있고(정상입니다 — "피나클만 쓰는
+경우" 참고), 두 번째 채널이 실질적으로 계속 오는 알림이 됩니다. 세 번째(다폴더)
+채널도 마찬가지로 독립적인 두 번째 북메이커가 있어야 의미 있게 작동합니다.
 
 ## Current scope / what's next
 
 Shipped: core-market arbitrage (1X2, 2-way moneyline, totals, Asian
 handicap, BTTS), push-aware math, stake calculator, value-edge model
 (exotic markets + same-book cross-line consistency — works with just
-Pinnacle), API-key auth, live pick-box dashboard, 신규 확정픽 브라우저
-알림(+소리), 확정픽/가치엣지 각각 별도 채널의 텔레그램 서버 사이드 알림,
-크로스 프로바이더 아비트리지 병합, dummy-data-free (설정 안 하면 빈 화면).
+Pinnacle), cross-match parlay (다폴더) value scanner mixed into the same
+feed as single-leg value edges, API-key auth, live pick-box dashboard,
+신규 확정픽 브라우저 알림(+소리), 확정픽/가치엣지/다폴더 각각 별도 채널의
+텔레그램 서버 사이드 알림, 크로스 프로바이더 아비트리지 병합,
+dummy-data-free (설정 안 하면 빈 화면).
 
 Still blocking real use (see "실데이터 연결" above), in priority order:
 1. `ODDS_API_KEY` 구독 (Business 플랜, $99/월) — 이게 있어야 실제로 뭔가 뜸.
@@ -307,5 +354,8 @@ Still blocking real use (see "실데이터 연결" above), in priority order:
 Not built yet (natural next steps, intentionally out of scope for this
 MVP): user signup/billing (Stripe), DB migrations (Alembic — currently
 `create_all` on startup), more sports/markets, odds history charts,
-per-user bookmaker account management for actually placing bets (this
-scaffold only surfaces opportunities, it never places a bet for you).
+same-game parlays (correlated legs, needs different modeling than
+`app/engine/parlay.py`'s cross-match-only approach), parlay/single
+hedging for guaranteed outcomes, per-user bookmaker account management
+for actually placing bets (this scaffold only surfaces opportunities, it
+never places a bet for you).

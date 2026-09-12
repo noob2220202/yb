@@ -1,3 +1,4 @@
+import json
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -6,14 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.enums import Sport
 from app.core.schemas import OddsQuote
-from app.db.models import ArbitrageOpportunity, Event, ValueEdge
+from app.db.models import ArbitrageOpportunity, Event, ParlayValueFind, ValueEdge
 from app.db.session import get_session_maker
 from app.engine.scanner import run_scan_cycle
 from app.notifications.telegram import (
     format_digest,
+    format_parlay_box,
+    format_parlay_digest,
     format_pick_box,
-    format_value_edge_digest,
     format_value_edge_box,
+    format_value_edge_digest,
     send_telegram_message,
 )
 from app.providers.base import OddsProvider
@@ -31,6 +34,7 @@ _scheduler: AsyncIOScheduler | None = None
 # cache.
 _notified_keys: set[str] = set()
 _notified_edge_keys: set[str] = set()
+_notified_parlay_keys: set[str] = set()
 
 
 def build_providers() -> list[OddsProvider]:
@@ -146,18 +150,48 @@ async def _notify_new_value_edges(session: AsyncSession, edges: list[ValueEdge])
     await send_telegram_message(format_value_edge_digest(boxes))
 
 
-async def poll_and_scan() -> tuple[list[ArbitrageOpportunity], list[ValueEdge]]:
+def _parlay_key(find: ParlayValueFind) -> str:
+    legs = json.loads(find.legs_json)
+    leg_keys = sorted(f"{leg['event_label']}|{leg['market']}|{leg['line']}|{leg['selection']}" for leg in legs)
+    return f"{find.bookmaker}|" + "&".join(leg_keys)
+
+
+async def _notify_new_parlay_finds(session: AsyncSession, finds: list[ParlayValueFind]) -> None:
+    """Third Telegram channel, same new-only dedupe pattern as the other
+    two. A separate (higher) threshold than single-market value edges
+    since a multi-leg parlay compounds risk on top of already not being
+    guaranteed — see app/engine/parlay.py.
+    """
+    settings = get_settings()
+    if not settings.telegram_configured or not finds:
+        return
+
+    current_keys = {_parlay_key(f) for f in finds}
+    fresh = [
+        f for f in finds if _parlay_key(f) not in _notified_parlay_keys and f.edge_percent >= settings.telegram_min_parlay_edge_percent
+    ]
+    _notified_parlay_keys.clear()
+    _notified_parlay_keys.update(current_keys)
+    if not fresh:
+        return
+
+    boxes = [format_parlay_box(i, find) for i, find in enumerate(fresh, start=1)]
+    await send_telegram_message(format_parlay_digest(boxes))
+
+
+async def poll_and_scan() -> tuple[list[ArbitrageOpportunity], list[ValueEdge], list[ParlayValueFind]]:
     sports = _active_sports()
     quotes = await _collect_quotes(sports)
     if not quotes:
-        return [], []
+        return [], [], []
 
     async with get_session_maker()() as session:
-        opportunities, edges = await run_scan_cycle(session, quotes, source="scheduled_poll")
+        opportunities, edges, parlay_finds = await run_scan_cycle(session, quotes, source="scheduled_poll")
         await _notify_new_opportunities(session, opportunities)
         await _notify_new_value_edges(session, edges)
+        await _notify_new_parlay_finds(session, parlay_finds)
 
-    return opportunities, edges
+    return opportunities, edges, parlay_finds
 
 
 def start_scheduler() -> AsyncIOScheduler:

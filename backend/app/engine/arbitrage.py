@@ -91,6 +91,27 @@ class ArbitrageResult:
         return (1.0 / self.total_implied_probability - 1.0) * 100.0
 
 
+def best_odds_per_selection(quotes: Iterable[OddsQuote], required: frozenset[str]) -> dict[str, OddsQuote] | None:
+    """Picks the best (highest) odds per selection across every quote in
+    ``quotes`` for one (event, market, line) group. Returns ``None`` if
+    any of ``required`` has no quote at all (an incomplete partition).
+    Shared by ``find_arbitrage`` and the parlay value scanner, which both
+    need "the best price anywhere for this exact outcome" as a building
+    block.
+    """
+    best: dict[str, OddsQuote] = {}
+    for q in quotes:
+        if q.selection not in required:
+            continue
+        current = best.get(q.selection)
+        if current is None or q.decimal_odds > current.decimal_odds:
+            best[q.selection] = q
+
+    if set(best.keys()) != set(required):
+        return None
+    return best
+
+
 def find_arbitrage(quotes: Iterable[OddsQuote]) -> ArbitrageResult | None:
     """Look for an arbitrage within one (event, market, line) group of quotes.
 
@@ -115,15 +136,8 @@ def find_arbitrage(quotes: Iterable[OddsQuote]) -> ArbitrageResult | None:
     if not required:
         return None
 
-    best: dict[str, OddsQuote] = {}
-    for q in quotes:
-        if q.selection not in required:
-            continue
-        current = best.get(q.selection)
-        if current is None or q.decimal_odds > current.decimal_odds:
-            best[q.selection] = q
-
-    if set(best.keys()) != set(required):
+    best = best_odds_per_selection(quotes, required)
+    if best is None:
         return None
 
     total_implied = sum(1.0 / q.decimal_odds for q in best.values())

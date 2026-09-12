@@ -50,6 +50,26 @@ export interface ValueEdge {
   detected_at: string;
 }
 
+export interface ParlayLeg {
+  event_label: string;
+  market: string;
+  line: number | null;
+  selection: string;
+  bookmaker: string;
+  decimal_odds: number;
+  fair_probability: number;
+}
+
+export interface ParlayValueFind {
+  id: number;
+  bookmaker: string;
+  combined_odds: number;
+  combined_fair_probability: number;
+  edge_percent: number;
+  legs: ParlayLeg[];
+  detected_at: string;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -68,6 +88,10 @@ export function fetchOpportunities(): Promise<Opportunity[]> {
 
 export function fetchValueEdges(): Promise<ValueEdge[]> {
   return apiFetch<ValueEdge[]>("/value-edges?limit=100");
+}
+
+export function fetchParlayValue(): Promise<ParlayValueFind[]> {
+  return apiFetch<ParlayValueFind[]>("/parlay-value?limit=100");
 }
 
 export function fetchStakePlan(opportunityId: number, totalStake: number): Promise<StakePlan> {

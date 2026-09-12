@@ -5,8 +5,8 @@ from sqlalchemy import select
 
 from app.core.enums import MarketType, Sport
 from app.core.schemas import NormalizedEvent, OddsQuote
-from app.db.models import ArbitrageOpportunity, OddsSnapshot, ValueEdge
-from app.engine.scanner import run_scan_cycle, scan_arbitrage, scan_value_edges, store_quotes
+from app.db.models import ArbitrageOpportunity, OddsSnapshot, ParlayValueFind, ValueEdge
+from app.engine.scanner import run_scan_cycle, scan_arbitrage, scan_parlay_value, scan_value_edges, store_quotes
 from tests.fixtures import demo_quotes
 
 
@@ -14,7 +14,7 @@ from tests.fixtures import demo_quotes
 async def test_full_scan_cycle_persists_snapshots_arbs_and_edges(db_session):
     quotes = demo_quotes([Sport.SOCCER, Sport.BASKETBALL])
 
-    opportunities, edges = await run_scan_cycle(db_session, quotes, source="test")
+    opportunities, edges, parlay_finds = await run_scan_cycle(db_session, quotes, source="test")
 
     # 3 arbitrage-eligible markets in the fixture: soccer 3-way ML, soccer
     # totals 2.5, soccer AH -0.5, plus basketball 2-way ML.
@@ -45,7 +45,7 @@ async def test_full_scan_cycle_persists_snapshots_arbs_and_edges(db_session):
 async def test_rerunning_scan_does_not_dedupe_but_reflects_latest_odds(db_session):
     quotes = demo_quotes([Sport.SOCCER])
     await run_scan_cycle(db_session, quotes, source="test")
-    opportunities, _ = await run_scan_cycle(db_session, quotes, source="test")
+    opportunities, _, _ = await run_scan_cycle(db_session, quotes, source="test")
     assert len(opportunities) == 3  # this cycle's own detections, independent of the previous run
 
     all_stored = (await db_session.execute(select(ArbitrageOpportunity))).scalars().all()
@@ -152,3 +152,40 @@ async def test_scan_arbitrage_isolates_one_broken_groups_math(db_session, monkey
     # aborting.
     assert call_count == 9
     assert len(opportunities) == 3
+
+
+@pytest.mark.asyncio
+async def test_scan_parlay_value_persists_a_cross_match_find(db_session):
+    """End-to-end persistence check for the parlay scanner: a clearly
+    generous book across 3 independent matches should produce a stored
+    ParlayValueFind with correct legs_json. Math itself is covered
+    exhaustively in tests/test_parlay.py -- this just proves the DB wiring.
+    """
+    quotes = []
+    for name, sharp_home, soft_home in [("MatchA", 1.95, 2.30), ("MatchB", 1.95, 2.30), ("MatchC", 1.95, 2.30)]:
+        event = NormalizedEvent(
+            sport=Sport.SOCCER,
+            home_team=name,
+            away_team="Away",
+            commence_time=datetime(2026, 4, 1, tzinfo=timezone.utc),
+            league="Test",
+        )
+        quotes.append(OddsQuote(event, "Sharp", MarketType.MONEYLINE_2WAY, "home", sharp_home))
+        quotes.append(OddsQuote(event, "Sharp", MarketType.MONEYLINE_2WAY, "away", 1.95))
+        quotes.append(OddsQuote(event, "Soft", MarketType.MONEYLINE_2WAY, "home", soft_home))
+        quotes.append(OddsQuote(event, "Soft", MarketType.MONEYLINE_2WAY, "away", 1.70))
+
+    await store_quotes(db_session, quotes, source="test")
+    finds = await scan_parlay_value(db_session, quotes)
+
+    assert len(finds) >= 1
+    stored = (await db_session.execute(select(ParlayValueFind))).scalars().all()
+    assert len(stored) == len(finds)
+    assert all(f.edge_percent > 0 for f in finds)
+
+    import json
+
+    legs = json.loads(finds[0].legs_json)
+    assert len(legs) >= 2
+    assert {leg["event_label"] for leg in legs} <= {"MatchA vs Away", "MatchB vs Away", "MatchC vs Away"}
+    assert all(leg["bookmaker"] == finds[0].bookmaker for leg in legs)

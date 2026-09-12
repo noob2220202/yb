@@ -61,4 +61,8 @@ def test_fresh_install_with_no_providers_configured_is_empty_not_fake(empty_api_
 
     resp = empty_api_client.post("/admin/poll", headers={"x-api-key": "empty-key"})
     assert resp.status_code == 200
-    assert resp.json() == {"opportunities_found": 0, "value_edges_found": 0}
+    assert resp.json() == {"opportunities_found": 0, "value_edges_found": 0, "parlay_finds_found": 0}
+
+    resp = empty_api_client.get("/parlay-value", headers={"x-api-key": "empty-key"})
+    assert resp.status_code == 200
+    assert resp.json() == []

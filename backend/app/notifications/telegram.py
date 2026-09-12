@@ -15,7 +15,7 @@ import json
 import httpx
 
 from app.config import get_settings
-from app.db.models import ArbitrageOpportunity, Event, ValueEdge
+from app.db.models import ArbitrageOpportunity, Event, ParlayValueFind, ValueEdge
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -51,6 +51,23 @@ def format_value_edge_box(index: int, event: Event, edge: ValueEdge) -> str:
 
 def format_value_edge_digest(boxes: list[str]) -> str:
     header = f"🔎 가치 베팅 엣지 {len(boxes)}건 발견 (확정 수익 아님)\n"
+    return header + "\n\n".join(boxes)
+
+
+def format_parlay_box(index: int, find: ParlayValueFind) -> str:
+    legs = json.loads(find.legs_json)
+    legs_text = "\n".join(
+        f"  ▸ {leg['event_label']}: {leg['selection']} @ {leg['bookmaker']}  {leg['decimal_odds']:.2f}" for leg in legs
+    )
+    return (
+        f"[{index}] {find.bookmaker} · {len(legs)}다리 다폴더\n"
+        f"{legs_text}\n"
+        f"합산 배당 {find.combined_odds:.2f}  (모델 엣지 +{find.edge_percent:.1f}%)"
+    )
+
+
+def format_parlay_digest(boxes: list[str]) -> str:
+    header = f"🧩 다폴더 가치 픽 {len(boxes)}건 발견 (확정 수익 아님)\n"
     return header + "\n\n".join(boxes)
 
 
