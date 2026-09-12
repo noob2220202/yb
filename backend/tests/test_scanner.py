@@ -90,3 +90,65 @@ async def test_single_bookmaker_finds_value_edges_but_never_arbitrage(db_session
     assert edges[0].market == "totals"
     assert edges[0].line == 3.5
     assert edges[0].edge_percent > 2.0
+
+
+@pytest.mark.asyncio
+async def test_scan_value_edges_isolates_one_broken_events_calibration(db_session, monkeypatch):
+    """One event's odds somehow breaking the scoreline model (a scipy
+    numerical edge case, bad data, ...) must not cost every other event's
+    value edges in the same cycle.
+    """
+    quotes = await DemoProvider().fetch([Sport.SOCCER])
+    await store_quotes(db_session, quotes, source="demo")
+
+    import app.engine.scanner as scanner_module
+
+    real_calibrate = scanner_module.scoreline_model.calibrate
+    call_count = 0
+
+    def flaky_calibrate(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated calibration failure")
+        return real_calibrate(*args, **kwargs)
+
+    monkeypatch.setattr(scanner_module.scoreline_model, "calibrate", flaky_calibrate)
+
+    edges = await scan_value_edges(db_session, quotes)
+    assert call_count == 2  # Arsenal-Chelsea's calibration attempt failed, City-Newcastle's still ran
+    # City-Newcastle's edges (correct score + the Totals 3.5 cross-line one) survive...
+    assert any(e.selection == "2-1" for e in edges)
+    assert any(e.market == "totals" and e.line == 3.5 for e in edges)
+    # ...but Arsenal-Chelsea's own cross-line edges (its Asian Handicap -0.5
+    # price vs. its own model) do NOT appear, since that event's whole
+    # calibration attempt raised and was skipped.
+    assert not any(e.market == "asian_handicap" for e in edges)
+
+
+@pytest.mark.asyncio
+async def test_scan_arbitrage_isolates_one_broken_groups_math(db_session, monkeypatch):
+    quotes = await DemoProvider().fetch([Sport.SOCCER, Sport.BASKETBALL])
+    await store_quotes(db_session, quotes, source="demo")
+
+    import app.engine.scanner as scanner_module
+
+    real_find_arbitrage = scanner_module.find_arbitrage
+    call_count = 0
+
+    def flaky_find_arbitrage(group):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated arbitrage math failure")
+        return real_find_arbitrage(group)
+
+    monkeypatch.setattr(scanner_module, "find_arbitrage", flaky_find_arbitrage)
+
+    opportunities = await scan_arbitrage(db_session, quotes)
+    # 9 non-exotic (event, market, line) groups exist in this fixture; the
+    # first one raises and is skipped (losing that one real arbitrage), but
+    # every other group must still get scanned rather than the whole call
+    # aborting.
+    assert call_count == 9
+    assert len(opportunities) == 3

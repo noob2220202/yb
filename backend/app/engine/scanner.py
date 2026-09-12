@@ -6,6 +6,7 @@ value-edge scan (exotic markets) over them.
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -17,6 +18,8 @@ from app.core.schemas import NormalizedEvent, OddsQuote
 from app.db.models import ArbitrageOpportunity, Bookmaker, Event, OddsSnapshot, ValueEdge
 from app.engine import scoreline_model
 from app.engine.arbitrage import find_arbitrage
+
+logger = logging.getLogger(__name__)
 
 MIN_VALUE_EDGE_PERCENT = 2.0
 PREFERRED_TOTALS_LINE = 2.5
@@ -90,7 +93,11 @@ async def scan_arbitrage(session: AsyncSession, quotes: list[OddsQuote]) -> list
     for (event_key, market, _line), group in group_by_market(quotes).items():
         if market.is_exotic:
             continue  # exotic markets go through scan_value_edges instead
-        result = find_arbitrage(group)
+        try:
+            result = find_arbitrage(group)
+        except Exception:
+            logger.exception("find_arbitrage failed for event=%s market=%s", event_key, market)
+            continue
         if result is None or not result.is_arbitrage:
             continue
 
@@ -188,19 +195,26 @@ async def scan_value_edges(session: AsyncSession, quotes: list[OddsQuote]) -> li
             if q.market == MarketType.ASIAN_HANDICAP and q.line is not None
         ]
 
-        calibrated = scoreline_model.calibrate(*calibration_inputs)
-        calibration_totals_line = calibration_inputs[3]
+        try:
+            calibrated = scoreline_model.calibrate(*calibration_inputs)
+            calibration_totals_line = calibration_inputs[3]
 
-        exotic_found = scoreline_model.find_value_edges(
-            calibrated.matrix, correct_score_quotes, margin_quotes, min_edge_percent=MIN_VALUE_EDGE_PERCENT
-        )
-        cross_line_found = scoreline_model.find_cross_line_edges(
-            calibrated.matrix,
-            totals_quotes,
-            handicap_quotes,
-            calibration_totals_line=calibration_totals_line,
-            min_edge_percent=MIN_VALUE_EDGE_PERCENT,
-        )
+            exotic_found = scoreline_model.find_value_edges(
+                calibrated.matrix, correct_score_quotes, margin_quotes, min_edge_percent=MIN_VALUE_EDGE_PERCENT
+            )
+            cross_line_found = scoreline_model.find_cross_line_edges(
+                calibrated.matrix,
+                totals_quotes,
+                handicap_quotes,
+                calibration_totals_line=calibration_totals_line,
+                min_edge_percent=MIN_VALUE_EDGE_PERCENT,
+            )
+        except Exception:
+            # One event's odds being weird enough to break calibration (or
+            # a future scipy/numerical edge case) must never cost every
+            # OTHER event's value edges in this cycle.
+            logger.exception("scoreline model failed for event=%s", event_key)
+            continue
         if not exotic_found and not cross_line_found:
             continue
 

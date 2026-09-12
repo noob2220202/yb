@@ -76,17 +76,24 @@ async def stake_plan(
     if opp is None:
         raise HTTPException(status_code=404, detail="opportunity not found")
 
-    legs = tuple(
-        Leg(selection=leg["selection"], bookmaker=leg["bookmaker"], decimal_odds=leg["decimal_odds"])
-        for leg in json.loads(opp.legs_json)
-    )
-    result = ArbitrageResult(
-        market=MarketType(opp.market),
-        line=opp.line,
-        legs=legs,
-        total_implied_probability=opp.total_implied_probability,
-        push_possible=opp.push_possible,
-    )
+    try:
+        legs = tuple(
+            Leg(selection=leg["selection"], bookmaker=leg["bookmaker"], decimal_odds=leg["decimal_odds"])
+            for leg in json.loads(opp.legs_json)
+        )
+        result = ArbitrageResult(
+            market=MarketType(opp.market),
+            line=opp.line,
+            legs=legs,
+            total_implied_probability=opp.total_implied_probability,
+            push_possible=opp.push_possible,
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        # legs_json/market are always written by our own scanner, so this
+        # should never happen — but a stored record failing to reconstruct
+        # should surface as a clear 500, not an unhandled crash.
+        raise HTTPException(status_code=500, detail="stored opportunity record is corrupted") from exc
+
     try:
         plan = allocate_stakes(result, total_stake)
     except ValueError as exc:

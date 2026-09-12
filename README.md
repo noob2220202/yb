@@ -184,8 +184,18 @@ docker-compose reads) once you have real accounts.
 - **Pinnacle**: requires a Pinnacle account with API access approved and
   their terms accepted. See https://pinnacleapi.github.io/ for current
   endpoint docs — `app/providers/pinnacle.py` documents the response shape
-  it expects and degrades gracefully (skips malformed records) if the
-  schema drifts.
+  it expects. Two separate things are true about this adapter: (1) it has
+  never been checked against a real, credentialed Pinnacle response (no
+  approved account was available while building this) — the field names
+  are a best-effort mapping from public docs, so **the first thing to do
+  once you have an account is diff a real `/v3/odds` response against
+  `_parse_period`** and adjust if it doesn't match; (2) regardless of
+  whether the shape is exactly right, the parser is defensive at every
+  nesting level (payload/league/event/period/row) — a malformed or
+  differently-shaped item is skipped rather than raising, and this is
+  covered by tests that specifically feed it broken shapes
+  (`tests/test_providers.py`), so a schema mismatch degrades to "fewer
+  quotes" instead of crashing the poll.
 - **The Odds API** (https://the-odds-api.com): a paid aggregator that
   returns real prices from many independent bookmakers in one call — this
   is what makes genuine cross-bookmaker arbitrage possible. Set

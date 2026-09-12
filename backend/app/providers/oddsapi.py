@@ -5,6 +5,12 @@ is what makes genuine cross-bookmaker arbitrage possible — Pinnacle alone
 is a single price source and can never be arbed against itself. Requires
 an API key (``ODDS_API_KEY``); this is a paid third-party product, this
 project just consumes its documented v4 REST API.
+
+Parsing is defensive at every nesting level (payload, event, bookmaker,
+market, outcome): a malformed or unexpectedly-shaped item is skipped
+rather than raising, so one bad record — or an error payload where a
+successful list was expected — degrades to "fewer quotes this cycle"
+instead of crashing the poll.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ import httpx
 
 from app.core.enums import MarketType, Sport
 from app.core.schemas import NormalizedEvent, OddsQuote
-from app.providers.base import OddsProvider
+from app.providers.base import OddsProvider, parse_decimal_odds, parse_float
 
 
 def _infer_sport(sport_key: str) -> Sport | None:
@@ -28,28 +34,72 @@ def _infer_sport(sport_key: str) -> Sport | None:
     return None
 
 
-def parse_oddsapi_response(payload: list[dict], sport: Sport) -> list[OddsQuote]:
+def _parse_commence_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def parse_oddsapi_response(payload: object, sport: Sport) -> list[OddsQuote]:
     quotes: list[OddsQuote] = []
-    for event in payload or []:
+    if not isinstance(payload, list):
+        return quotes  # e.g. an {"message": "..."} error body instead of the expected list
+
+    for event in payload:
+        if not isinstance(event, dict):
+            continue
         try:
-            home_team = event["home_team"]
-            away_team = event["away_team"]
-            commence_time = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
-        except (KeyError, ValueError, AttributeError):
+            quotes.extend(_parse_event(event, sport))
+        except Exception:  # noqa: BLE001 - one malformed event must never abort the rest
+            continue
+    return quotes
+
+
+def _parse_event(event: dict, sport: Sport) -> list[OddsQuote]:
+    home_team = event.get("home_team")
+    away_team = event.get("away_team")
+    commence_time = _parse_commence_time(event.get("commence_time"))
+    if not isinstance(home_team, str) or not isinstance(away_team, str) or commence_time is None:
+        return []
+    if not home_team or not away_team:
+        return []
+
+    league = event.get("sport_title")
+    normalized_event = NormalizedEvent(
+        sport=sport,
+        home_team=home_team,
+        away_team=away_team,
+        commence_time=commence_time,
+        league=league if isinstance(league, str) else "",
+    )
+
+    bookmakers = event.get("bookmakers")
+    if not isinstance(bookmakers, list):
+        return []
+
+    quotes: list[OddsQuote] = []
+    for bookmaker in bookmakers:
+        if not isinstance(bookmaker, dict):
+            continue
+        book_name = bookmaker.get("title") or bookmaker.get("key") or "unknown"
+        if not isinstance(book_name, str):
+            book_name = "unknown"
+
+        markets = bookmaker.get("markets")
+        if not isinstance(markets, list):
             continue
 
-        normalized_event = NormalizedEvent(
-            sport=sport,
-            home_team=home_team,
-            away_team=away_team,
-            commence_time=commence_time,
-            league=event.get("sport_title", ""),
-        )
-
-        for bookmaker in event.get("bookmakers", []) or []:
-            book_name = bookmaker.get("title") or bookmaker.get("key") or "unknown"
-            for market in bookmaker.get("markets", []) or []:
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            try:
                 quotes.extend(_parse_market(normalized_event, book_name, home_team, away_team, market))
+            except Exception:  # noqa: BLE001 - one malformed market must never abort the rest
+                continue
+
     return quotes
 
 
@@ -57,16 +107,18 @@ def _parse_market(
     event: NormalizedEvent, book_name: str, home_team: str, away_team: str, market: dict
 ) -> list[OddsQuote]:
     key = market.get("key")
-    outcomes = market.get("outcomes", []) or []
+    outcomes = market.get("outcomes")
+    if not isinstance(outcomes, list):
+        return []
+    outcomes = [o for o in outcomes if isinstance(o, dict)]
     quotes: list[OddsQuote] = []
 
     if key == "h2h":
         has_draw = any(o.get("name") == "Draw" for o in outcomes)
         market_type = MarketType.MONEYLINE_3WAY if has_draw else MarketType.MONEYLINE_2WAY
         for outcome in outcomes:
-            try:
-                price = float(outcome["price"])
-            except (KeyError, TypeError, ValueError):
+            price = parse_decimal_odds(outcome.get("price"))
+            if price is None:
                 continue
             name = outcome.get("name")
             if name == home_team:
@@ -81,31 +133,35 @@ def _parse_market(
 
     elif key == "totals":
         for outcome in outcomes:
-            try:
-                price = float(outcome["price"])
-                line = float(outcome["point"])
-            except (KeyError, TypeError, ValueError):
+            price = parse_decimal_odds(outcome.get("price"))
+            line = parse_float(outcome.get("point"))
+            if price is None or line is None:
                 continue
-            name = (outcome.get("name") or "").lower()
+            name = outcome.get("name")
+            name = name.lower() if isinstance(name, str) else ""
             if name not in ("over", "under"):
                 continue
             quotes.append(OddsQuote(event, book_name, MarketType.TOTALS, name, price, line=line))
 
     elif key == "spreads":
-        home_point = None
-        away_point = None
+        home_point = away_point = None
         home_price = away_price = None
         for outcome in outcomes:
-            try:
-                price = float(outcome["price"])
-                point = float(outcome["point"])
-            except (KeyError, TypeError, ValueError):
+            price = parse_decimal_odds(outcome.get("price"))
+            point = parse_float(outcome.get("point"))
+            if price is None or point is None:
                 continue
             if outcome.get("name") == home_team:
                 home_point, home_price = point, price
             elif outcome.get("name") == away_team:
                 away_point, away_price = point, price
-        if home_point is not None and away_point is not None and abs(home_point + away_point) < 1e-6:
+        if (
+            home_point is not None
+            and away_point is not None
+            and home_price is not None
+            and away_price is not None
+            and abs(home_point + away_point) < 1e-6
+        ):
             quotes.append(OddsQuote(event, book_name, MarketType.ASIAN_HANDICAP, "home", home_price, line=home_point))
             quotes.append(OddsQuote(event, book_name, MarketType.ASIAN_HANDICAP, "away", away_price, line=home_point))
 
@@ -147,5 +203,8 @@ class OddsApiProvider(OddsProvider):
                     payload = resp.json()
                 except httpx.HTTPError:
                     continue
-                quotes.extend(parse_oddsapi_response(payload, inferred))
+                try:
+                    quotes.extend(parse_oddsapi_response(payload, inferred))
+                except Exception:  # noqa: BLE001 - a parsing bug must never take down the whole poll
+                    continue
         return quotes

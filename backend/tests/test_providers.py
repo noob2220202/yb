@@ -2,6 +2,7 @@ import asyncio
 
 from app.core.enums import MarketType, Sport
 from app.engine.arbitrage import find_arbitrage
+from app.providers.base import parse_decimal_odds, parse_float
 from app.providers.demo import DemoProvider
 from app.providers.oddsapi import parse_oddsapi_response
 from app.providers.pinnacle import parse_pinnacle_odds
@@ -123,6 +124,137 @@ def test_oddsapi_parser_normalizes_h2h_totals_and_spreads():
     assert by_market[(MarketType.TOTALS, "over", 2.5)] == 1.95
     assert by_market[(MarketType.ASIAN_HANDICAP, "home", -0.5)] == 1.90
     assert by_market[(MarketType.ASIAN_HANDICAP, "away", -0.5)] == 1.95
+
+
+def test_parse_float_rejects_non_numeric_and_bool():
+    assert parse_float("2.5") == 2.5
+    assert parse_float(2.5) == 2.5
+    assert parse_float("oops") is None
+    assert parse_float(None) is None
+    assert parse_float({"nested": "dict"}) is None
+    assert parse_float(True) is None  # bool is an int subclass, never a real value here
+
+
+def test_parse_decimal_odds_rejects_odds_at_or_below_one():
+    assert parse_decimal_odds(2.10) == 2.10
+    assert parse_decimal_odds("1.95") == 1.95
+    assert parse_decimal_odds(1.0) is None
+    assert parse_decimal_odds(0.0) is None
+    assert parse_decimal_odds(-2.10) is None
+    assert parse_decimal_odds("garbage") is None
+
+
+def test_pinnacle_parser_top_level_shape_guards():
+    assert parse_pinnacle_odds({"leagues": "not-a-list"}, Sport.SOCCER) == []
+    assert parse_pinnacle_odds({"leagues": [{"events": "not-a-list"}]}, Sport.SOCCER) == []
+    assert parse_pinnacle_odds("not-even-a-dict", Sport.SOCCER) == []
+    assert parse_pinnacle_odds(None, Sport.SOCCER) == []
+    assert parse_pinnacle_odds([1, 2, 3], Sport.SOCCER) == []
+
+
+def test_pinnacle_parser_isolates_one_malformed_event_from_the_rest():
+    """The real bug this guards against: one event with a completely
+    wrong-shaped ``periods`` (a dict instead of a list) used to raise
+    partway through parsing and abort every OTHER event in the same
+    payload too. Now it must only drop the bad event.
+    """
+    payload = {
+        "leagues": [
+            {
+                "name": "L",
+                "events": [
+                    {
+                        "home": "Bad",
+                        "away": "Event",
+                        "starts": "2026-02-01T15:00:00Z",
+                        "periods": {"not": "a list"},
+                    },
+                    {
+                        "home": "Good",
+                        "away": "Event",
+                        "starts": "2026-02-01T15:00:00Z",
+                        "periods": [
+                            {"number": 0, "money_line": {"home": 2.10, "away": 3.50}}
+                        ],
+                    },
+                ],
+            }
+        ]
+    }
+    quotes = parse_pinnacle_odds(payload, Sport.SOCCER)
+    assert len(quotes) == 2
+    assert all(q.event.home_team == "Good" for q in quotes)
+
+
+def test_pinnacle_parser_rejects_non_positive_odds():
+    payload = {
+        "leagues": [
+            {
+                "name": "L",
+                "events": [
+                    {
+                        "home": "A",
+                        "away": "B",
+                        "starts": "2026-02-01T15:00:00Z",
+                        "periods": [
+                            {"number": 0, "money_line": {"home": 1.0, "away": 0}},
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    assert parse_pinnacle_odds(payload, Sport.SOCCER) == []
+
+
+def test_oddsapi_parser_top_level_shape_guards():
+    assert parse_oddsapi_response({"message": "error from upstream"}, Sport.SOCCER) == []
+    assert parse_oddsapi_response(None, Sport.SOCCER) == []
+    assert parse_oddsapi_response("nope", Sport.SOCCER) == []
+
+
+def test_oddsapi_parser_isolates_one_malformed_event_from_the_rest():
+    payload = [
+        {
+            "commence_time": "2026-02-01T15:00:00Z",
+            "home_team": "Bad",
+            "away_team": "Event",
+            "bookmakers": "not-a-list",  # completely wrong shape
+        },
+        {
+            "commence_time": "2026-02-01T15:00:00Z",
+            "home_team": "Good",
+            "away_team": "Event",
+            "bookmakers": [
+                {
+                    "title": "SomeBook",
+                    "markets": [
+                        {"key": "h2h", "outcomes": [{"name": "Good", "price": 2.10}, {"name": "Event", "price": 3.50}]}
+                    ],
+                }
+            ],
+        },
+    ]
+    quotes = parse_oddsapi_response(payload, Sport.SOCCER)
+    assert len(quotes) == 2
+    assert all(q.event.home_team == "Good" for q in quotes)
+
+
+def test_oddsapi_parser_rejects_non_positive_odds():
+    payload = [
+        {
+            "commence_time": "2026-02-01T15:00:00Z",
+            "home_team": "A",
+            "away_team": "B",
+            "bookmakers": [
+                {
+                    "title": "SomeBook",
+                    "markets": [{"key": "h2h", "outcomes": [{"name": "A", "price": 1.0}, {"name": "B", "price": -3.5}]}],
+                }
+            ],
+        }
+    ]
+    assert parse_oddsapi_response(payload, Sport.SOCCER) == []
 
 
 def test_oddsapi_parser_drops_inconsistent_spread_points():
