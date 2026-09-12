@@ -1,18 +1,16 @@
-import asyncio
-
 import httpx
 import pytest
 
 from app.core.enums import MarketType, Sport
 from app.engine.arbitrage import find_arbitrage
 from app.providers.base import parse_decimal_odds, parse_float
-from app.providers.demo import DemoProvider
 from app.providers.oddsapi import parse_oddsapi_response
 from app.providers.pinnacle import PinnacleProvider, parse_fixtures, parse_pinnacle_odds
+from tests.fixtures import demo_quotes
 
 
-def test_demo_provider_produces_a_real_moneyline_arbitrage():
-    quotes = asyncio.run(DemoProvider().fetch([Sport.SOCCER, Sport.BASKETBALL]))
+def test_fixture_quotes_produce_a_real_moneyline_arbitrage():
+    quotes = demo_quotes([Sport.SOCCER, Sport.BASKETBALL])
     arsenal_ml = [
         q
         for q in quotes
@@ -24,8 +22,8 @@ def test_demo_provider_produces_a_real_moneyline_arbitrage():
     assert result.margin_percent > 0
 
 
-def test_demo_provider_two_way_moneyline_arbitrage():
-    quotes = asyncio.run(DemoProvider().fetch([Sport.BASKETBALL]))
+def test_fixture_quotes_two_way_moneyline_arbitrage():
+    quotes = demo_quotes([Sport.BASKETBALL])
     ml = [q for q in quotes if q.market == MarketType.MONEYLINE_2WAY]
     result = find_arbitrage(ml)
     assert result is not None

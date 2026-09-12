@@ -7,14 +7,14 @@ from app.core.enums import MarketType, Sport
 from app.core.schemas import NormalizedEvent, OddsQuote
 from app.db.models import ArbitrageOpportunity, OddsSnapshot, ValueEdge
 from app.engine.scanner import run_scan_cycle, scan_arbitrage, scan_value_edges, store_quotes
-from app.providers.demo import DemoProvider
+from tests.fixtures import demo_quotes
 
 
 @pytest.mark.asyncio
 async def test_full_scan_cycle_persists_snapshots_arbs_and_edges(db_session):
-    quotes = await DemoProvider().fetch([Sport.SOCCER, Sport.BASKETBALL])
+    quotes = demo_quotes([Sport.SOCCER, Sport.BASKETBALL])
 
-    opportunities, edges = await run_scan_cycle(db_session, quotes, source="demo")
+    opportunities, edges = await run_scan_cycle(db_session, quotes, source="test")
 
     # 3 arbitrage-eligible markets in the fixture: soccer 3-way ML, soccer
     # totals 2.5, soccer AH -0.5, plus basketball 2-way ML.
@@ -23,11 +23,11 @@ async def test_full_scan_cycle_persists_snapshots_arbs_and_edges(db_session):
 
     # The deliberately generous correct-score price should be flagged.
     assert len(edges) >= 1
-    assert any(e.selection == "2-1" and e.bookmaker == "DemoBookSoft" for e in edges)
-    # ...and so should the same-bookmaker (DemoBookA-only) cross-line
+    assert any(e.selection == "2-1" and e.bookmaker == "FixtureBookSoft" for e in edges)
+    # ...and so should the same-bookmaker (FixtureBookA-only) cross-line
     # mispricing on Totals 3.5, while its fair-priced siblings (Totals 1.5,
     # Asian Handicap -1.5) should NOT be.
-    assert any(e.market == "totals" and e.line == 3.5 and e.bookmaker == "DemoBookA" for e in edges)
+    assert any(e.market == "totals" and e.line == 3.5 and e.bookmaker == "FixtureBookA" for e in edges)
     assert not any(e.line == 1.5 for e in edges)
     assert not any(e.market == "asian_handicap" and e.line == -1.5 for e in edges)
 
@@ -43,9 +43,9 @@ async def test_full_scan_cycle_persists_snapshots_arbs_and_edges(db_session):
 
 @pytest.mark.asyncio
 async def test_rerunning_scan_does_not_dedupe_but_reflects_latest_odds(db_session):
-    quotes = await DemoProvider().fetch([Sport.SOCCER])
-    await run_scan_cycle(db_session, quotes, source="demo")
-    opportunities, _ = await run_scan_cycle(db_session, quotes, source="demo")
+    quotes = demo_quotes([Sport.SOCCER])
+    await run_scan_cycle(db_session, quotes, source="test")
+    opportunities, _ = await run_scan_cycle(db_session, quotes, source="test")
     assert len(opportunities) == 3  # this cycle's own detections, independent of the previous run
 
     all_stored = (await db_session.execute(select(ArbitrageOpportunity))).scalars().all()
@@ -98,8 +98,8 @@ async def test_scan_value_edges_isolates_one_broken_events_calibration(db_sessio
     numerical edge case, bad data, ...) must not cost every other event's
     value edges in the same cycle.
     """
-    quotes = await DemoProvider().fetch([Sport.SOCCER])
-    await store_quotes(db_session, quotes, source="demo")
+    quotes = demo_quotes([Sport.SOCCER])
+    await store_quotes(db_session, quotes, source="test")
 
     import app.engine.scanner as scanner_module
 
@@ -128,8 +128,8 @@ async def test_scan_value_edges_isolates_one_broken_events_calibration(db_sessio
 
 @pytest.mark.asyncio
 async def test_scan_arbitrage_isolates_one_broken_groups_math(db_session, monkeypatch):
-    quotes = await DemoProvider().fetch([Sport.SOCCER, Sport.BASKETBALL])
-    await store_quotes(db_session, quotes, source="demo")
+    quotes = demo_quotes([Sport.SOCCER, Sport.BASKETBALL])
+    await store_quotes(db_session, quotes, source="test")
 
     import app.engine.scanner as scanner_module
 

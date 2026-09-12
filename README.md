@@ -35,8 +35,28 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
   Bookmakers can (and do) limit or close accounts that bet like an
   arbitrage bettor. This tool finds the numbers; using it is your call and
   your risk.
+- **No dummy data, anywhere.** With no provider configured, every
+  endpoint correctly returns empty — the app never fabricates a pick to
+  show something. The only way anything appears is a real
+  `ODDS_API_KEY` and/or approved `PINNACLE_USERNAME`/`PINNACLE_PASSWORD`.
 
-## 피나클만 쓰는 경우 (`USE_DEMO_PROVIDER=false`, Odds API 없이)
+## 실데이터 연결 — 권장 경로: The Odds API
+
+피나클 자체 API는 2025년 7월 23일부로 신규 신청이 막혀 있어서(아래 참고),
+**지금 가장 빠르고 확실하게 실배당을 받는 방법은 The Odds API Business
+플랜($99/월, 20만 요청/월)**입니다. 피나클을 포함해 50개 이상 북메이커
+배당을 정식 라이선스로 재판매하는 서비스라 스크래핑도 아니고 ToS 위반도
+아니며, 지역 차단 문제도 없습니다. 이 하나의 구독으로:
+
+- 피나클의 실제 가격을 "Pinnacle"이라는 북메이커 이름으로 그대로 받고
+- 동시에 다른 북메이커들 가격도 받아서 → **진짜 크로스북 아비트리지 계산이
+  바로 가능**해집니다 (피나클 하나만으로는 절대 안 됨 — 아래 참고).
+
+설정: `backend/.env`에 `ODDS_API_KEY`만 넣으면 됩니다. 이미 만들어둔
+`OddsApiProvider`가 응답에 있는 북메이커를 이름 그대로 저장하는 범용
+구조라서 코드 수정 없이 바로 동작합니다. https://theoddsapi.com/pricing
+
+## 피나클만 쓰는 경우 (Odds API 없이 피나클 직접 연동만)
 
 베팅을 피나클에서만 할 계획이라면 **"확정 수익 픽"(아비트리지) 섹션은 구조적으로
 계속 비어 있는 게 정상입니다** — 아비트리지는 정의상 최소 2개의 독립적인 배당이
@@ -60,9 +80,9 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
 ```
 backend/            FastAPI service
   app/core/          Canonical enums + in-memory OddsQuote/Event schema
-  app/providers/      Odds source adapters (pluggable)
+  app/providers/      Odds source adapters (pluggable) — no dummy data,
+                      each returns nothing until its credentials are set
     base.py           OddsProvider interface
-    demo.py           Synthetic fixture data — works with zero API keys
     pinnacle.py       Pinnacle official API adapter (Basic Auth)
     oddsapi.py        The Odds API adapter (aggregates many bookmakers)
   app/engine/
@@ -121,17 +141,18 @@ arbitrage engine — keep that distinction when presenting results to users.
 ```bash
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env   # defaults to USE_DEMO_PROVIDER=true, no API keys needed
+cp .env.example .env   # fill in ODDS_API_KEY and/or PINNACLE_USERNAME/PASSWORD
 .venv/bin/uvicorn app.main:app --reload
 ```
 
 Visit `http://localhost:8000/opportunities` with header `x-api-key:
-dev-local-key` (or `/health`, no auth). With `USE_DEMO_PROVIDER=true` (the
-default) it seeds a handful of synthetic events with a real, computed
-arbitrage margin and a real value-edge on startup — no external accounts
-required.
+dev-local-key` (or `/health`, no auth). **With no provider configured yet,
+this correctly returns `[]`** — that's not broken, that's the app refusing
+to show fabricated picks. Fill in `ODDS_API_KEY` (recommended, see above)
+and/or approved Pinnacle credentials to see real data.
 
-Run tests:
+Run tests (these use hand-computed fixture data under `tests/fixtures.py`,
+never the real app — see its docstring):
 
 ```bash
 cd backend && .venv/bin/pytest
@@ -175,9 +196,10 @@ docker compose up --build
 ```
 
 Backend on `:8000`, frontend on `:3000`, Postgres on `:5432`. Set
-`PINNACLE_USERNAME`/`PINNACLE_PASSWORD`, `ODDS_API_KEY`, and
-`USE_DEMO_PROVIDER=false` as environment variables (or a `.env` file
-docker-compose reads) once you have real accounts.
+`ODDS_API_KEY` and/or `PINNACLE_USERNAME`/`PINNACLE_PASSWORD` as
+environment variables (or a `.env` file docker-compose reads) once you
+have real accounts — with neither set, it comes up fine and shows an
+empty dashboard.
 
 ## Connecting real odds
 
@@ -247,9 +269,9 @@ TELEGRAM_MIN_EDGE_PERCENT=3.0     # 가치 베팅 엣지: 이 모델 엣지(%) �
 [1] Arsenal vs Chelsea
 마켓: Moneyline 3Way
 확정 마진: +2.44%
-  ▸ home @ DemoBookA  2.10
-  ▸ draw @ DemoBookB  3.60
-  ▸ away @ DemoBookC  4.50
+  ▸ home @ Pinnacle  2.10
+  ▸ draw @ BookB  3.60
+  ▸ away @ BookC  4.50
 
 [2] ...
 ```
@@ -259,7 +281,7 @@ TELEGRAM_MIN_EDGE_PERCENT=3.0     # 가치 베팅 엣지: 이 모델 엣지(%) �
 
 [1] Man City vs Newcastle
 마켓: Totals (라인 3.5) · 선택: over
-DemoBookA @ 4.72  (모델 엣지 +35.0%)
+Pinnacle @ 4.72  (모델 엣지 +35.0%)
 ```
 
 피나클만 설정한 경우 위쪽 채널은 거의 항상 비어 있고(정상입니다 — "피나클만 쓰는
@@ -272,7 +294,15 @@ handicap, BTTS), push-aware math, stake calculator, value-edge model
 (exotic markets + same-book cross-line consistency — works with just
 Pinnacle), API-key auth, live pick-box dashboard, 신규 확정픽 브라우저
 알림(+소리), 확정픽/가치엣지 각각 별도 채널의 텔레그램 서버 사이드 알림,
-크로스 프로바이더 아비트리지 병합.
+크로스 프로바이더 아비트리지 병합, dummy-data-free (설정 안 하면 빈 화면).
+
+Still blocking real use (see "실데이터 연결" above), in priority order:
+1. `ODDS_API_KEY` 구독 (Business 플랜, $99/월) — 이게 있어야 실제로 뭔가 뜸.
+2. (선택) 피나클 API 신규 신청 승인 (`api@pinnacle.com`) — 승인돼도 이
+   프로젝트의 파서는 공식 스펙 기준으로 짰을 뿐 실응답으로 검증된 적은 없어서,
+   승인 후 한 번 실제 응답과 대조해봐야 함.
+3. 어딘가에 상시 실행 (본인 PC 또는 VPS) — 이 세션/컨테이너는 껐다 켜면
+   사라짐, "상시 실행" 항목 참고.
 
 Not built yet (natural next steps, intentionally out of scope for this
 MVP): user signup/billing (Stripe), DB migrations (Alembic — currently

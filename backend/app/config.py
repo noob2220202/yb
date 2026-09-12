@@ -8,8 +8,6 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./yb.db"
 
-    use_demo_provider: bool = True
-
     pinnacle_base_url: str = "https://api.pinnacle.com"
     pinnacle_username: str = ""
     pinnacle_password: str = ""

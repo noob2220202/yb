@@ -21,7 +21,6 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://yb:yb@postgres:5432/yb
-      USE_DEMO_PROVIDER: "true"
       PINNACLE_BASE_URL: https://api.pinnacle.com
       PINNACLE_USERNAME: ${PINNACLE_USERNAME:-}
       PINNACLE_PASSWORD: ${PINNACLE_PASSWORD:-}
@@ -31,6 +30,10 @@ services:
       POLL_SPORTS: ${POLL_SPORTS:-soccer}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
       API_KEYS: ${API_KEYS:-dev-local-key}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_MIN_MARGIN_PERCENT: ${TELEGRAM_MIN_MARGIN_PERCENT:-1.0}
+      TELEGRAM_MIN_EDGE_PERCENT: ${TELEGRAM_MIN_EDGE_PERCENT:-3.0}
     depends_on:
       postgres:
         condition: service_healthy

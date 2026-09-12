@@ -17,7 +17,6 @@ from app.notifications.telegram import (
     send_telegram_message,
 )
 from app.providers.base import OddsProvider
-from app.providers.demo import DemoProvider
 from app.providers.oddsapi import OddsApiProvider
 from app.providers.pinnacle import PinnacleProvider
 
@@ -35,13 +34,16 @@ _notified_edge_keys: set[str] = set()
 
 
 def build_providers() -> list[OddsProvider]:
+    """Real providers only. Each is a no-op (``is_configured`` False) until
+    its credentials are set, so with nothing configured yet, polling is
+    simply a no-op and the dashboard correctly shows an empty state rather
+    than any fabricated data.
+    """
     settings = get_settings()
-    providers: list[OddsProvider] = []
-    if settings.use_demo_provider:
-        providers.append(DemoProvider())
-    providers.append(PinnacleProvider(settings.pinnacle_base_url, settings.pinnacle_username, settings.pinnacle_password))
-    providers.append(OddsApiProvider(settings.odds_api_base_url, settings.odds_api_key, settings.odds_api_sport_keys_list))
-    return providers
+    return [
+        PinnacleProvider(settings.pinnacle_base_url, settings.pinnacle_username, settings.pinnacle_password),
+        OddsApiProvider(settings.odds_api_base_url, settings.odds_api_key, settings.odds_api_sport_keys_list),
+    ]
 
 
 def _active_sports() -> list[Sport]:

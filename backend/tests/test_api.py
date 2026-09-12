@@ -7,11 +7,9 @@ import pytest
 def api_client(tmp_path_factory):
     db_path = tmp_path_factory.mktemp("api") / "test_api.db"
     original_env = {
-        k: os.environ.get(k)
-        for k in ("DATABASE_URL", "USE_DEMO_PROVIDER", "API_KEYS", "POLL_INTERVAL_SECONDS", "POLL_SPORTS")
+        k: os.environ.get(k) for k in ("DATABASE_URL", "API_KEYS", "POLL_INTERVAL_SECONDS", "POLL_SPORTS")
     }
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
-    os.environ["USE_DEMO_PROVIDER"] = "true"
     os.environ["API_KEYS"] = "test-key"
     os.environ["POLL_INTERVAL_SECONDS"] = "3600"
     os.environ["POLL_SPORTS"] = "soccer,basketball"
@@ -23,6 +21,17 @@ def api_client(tmp_path_factory):
     get_engine.cache_clear()
     get_session_maker.cache_clear()
 
+    # No real Pinnacle/Odds API credentials in tests -- swap in a fixture
+    # provider for the duration of this module so the API has real
+    # (fixture) data to serve, without the app itself ever knowing about
+    # dummy data. This mirrors exactly how a real deployment would behave
+    # once PINNACLE_USERNAME/ODDS_API_KEY etc. are actually configured.
+    import app.scheduler as scheduler_module
+    from tests.fixtures import FixtureProvider
+
+    original_build_providers = scheduler_module.build_providers
+    scheduler_module.build_providers = lambda: [FixtureProvider()]
+
     from fastapi.testclient import TestClient
 
     from app.main import app
@@ -30,6 +39,7 @@ def api_client(tmp_path_factory):
     with TestClient(app) as client:
         yield client
 
+    scheduler_module.build_providers = original_build_providers
     get_settings.cache_clear()
     get_engine.cache_clear()
     get_session_maker.cache_clear()
@@ -56,12 +66,12 @@ def test_opportunities_rejects_wrong_key(api_client):
     assert resp.status_code == 401
 
 
-def test_opportunities_lists_demo_arbitrage(api_client):
+def test_opportunities_lists_fixture_arbitrage(api_client):
     resp = api_client.get("/opportunities", headers={"x-api-key": "test-key"})
     assert resp.status_code == 200
     body = resp.json()
-    # seeded by the one startup poll against DemoProvider (soccer 3-way ML,
-    # soccer totals 2.5, soccer AH -0.5, basketball 2-way ML)
+    # seeded by the one startup poll against the fixture provider (soccer
+    # 3-way ML, soccer totals 2.5, soccer AH -0.5, basketball 2-way ML)
     assert len(body) == 4
     assert all(o["margin_percent"] > 0 for o in body)
 
@@ -90,7 +100,7 @@ def test_stake_plan_404_for_unknown_opportunity(api_client):
     assert resp.status_code == 404
 
 
-def test_value_edges_lists_demo_edge(api_client):
+def test_value_edges_lists_fixture_edge(api_client):
     resp = api_client.get("/value-edges", headers={"x-api-key": "test-key"})
     assert resp.status_code == 200
     body = resp.json()

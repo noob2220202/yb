@@ -15,7 +15,7 @@ from app.notifications.telegram import (
     format_value_edge_digest,
 )
 from app.providers.base import OddsProvider
-from app.providers.demo import ARSENAL_CHELSEA
+from tests.fixtures import ARSENAL_CHELSEA
 
 
 class FakeProvider(OddsProvider):
