@@ -23,6 +23,10 @@ class Settings(BaseSettings):
 
     api_keys: str = "dev-local-key"
 
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_min_margin_percent: float = 1.0
+
     @property
     def poll_sports_list(self) -> list[str]:
         return [s.strip() for s in self.poll_sports.split(",") if s.strip()]
@@ -42,6 +46,10 @@ class Settings(BaseSettings):
     @property
     def odds_api_configured(self) -> bool:
         return bool(self.odds_api_key)
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.telegram_bot_token and self.telegram_chat_id)
 
 
 @lru_cache

@@ -17,8 +17,11 @@ def api_client(tmp_path_factory):
     os.environ["POLL_SPORTS"] = "soccer,basketball"
 
     from app.config import get_settings
+    from app.db.session import get_engine, get_session_maker
 
     get_settings.cache_clear()
+    get_engine.cache_clear()
+    get_session_maker.cache_clear()
 
     from fastapi.testclient import TestClient
 
@@ -28,6 +31,8 @@ def api_client(tmp_path_factory):
         yield client
 
     get_settings.cache_clear()
+    get_engine.cache_clear()
+    get_session_maker.cache_clear()
     for k, v in original_env.items():
         if v is None:
             os.environ.pop(k, None)
