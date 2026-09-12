@@ -112,18 +112,7 @@ def test_admin_poll_triggers_another_cycle(api_client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["opportunities_found"] == 4
-    # Wiring check only -- the fixture data wasn't designed for parlay
-    # value-hunting, so whether it happens to clear the edge threshold is
-    # incidental; see tests/test_parlay.py for the dedicated math tests.
-    assert "parlay_finds_found" in body
-    assert body["parlay_finds_found"] >= 0
 
     # Now two cycles' worth should be stored.
     resp = api_client.get("/opportunities", headers={"x-api-key": "test-key"}, params={"limit": 500})
     assert len(resp.json()) == 8
-
-
-def test_parlay_value_endpoint_responds(api_client):
-    resp = api_client.get("/parlay-value", headers={"x-api-key": "test-key"})
-    assert resp.status_code == 200
-    assert isinstance(resp.json(), list)

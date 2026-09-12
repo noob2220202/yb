@@ -8,14 +8,12 @@ from app.api.auth import require_api_key
 from app.api.schemas import (
     LegOut,
     OpportunityOut,
-    ParlayLegOut,
-    ParlayValueFindOut,
     StakeLegOut,
     StakePlanOut,
     ValueEdgeOut,
 )
 from app.core.enums import MarketType
-from app.db.models import ArbitrageOpportunity, Event, ParlayValueFind, ValueEdge
+from app.db.models import ArbitrageOpportunity, Event, ValueEdge
 from app.db.session import get_session
 from app.engine.arbitrage import ArbitrageResult, Leg, allocate_stakes
 from app.scheduler import poll_and_scan
@@ -89,6 +87,7 @@ async def stake_plan(
             legs=legs,
             total_implied_probability=opp.total_implied_probability,
             push_possible=opp.push_possible,
+            stake_fractions=json.loads(opp.stake_fractions_json) if opp.stake_fractions_json else None,
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         # legs_json/market are always written by our own scanner, so this
@@ -143,38 +142,10 @@ async def list_value_edges(
     ]
 
 
-@router.get("/parlay-value", response_model=list[ParlayValueFindOut], dependencies=[Depends(require_api_key)])
-async def list_parlay_value(
-    min_edge: float = Query(5.0, ge=0.0),
-    limit: int = Query(50, ge=1, le=500),
-    session: AsyncSession = Depends(get_session),
-) -> list[ParlayValueFindOut]:
-    stmt = (
-        select(ParlayValueFind)
-        .where(ParlayValueFind.edge_percent >= min_edge)
-        .order_by(ParlayValueFind.detected_at.desc())
-        .limit(limit)
-    )
-    rows = (await session.execute(stmt)).scalars().all()
-    return [
-        ParlayValueFindOut(
-            id=find.id,
-            bookmaker=find.bookmaker,
-            combined_odds=find.combined_odds,
-            combined_fair_probability=find.combined_fair_probability,
-            edge_percent=find.edge_percent,
-            legs=[ParlayLegOut(**leg) for leg in json.loads(find.legs_json)],
-            detected_at=find.detected_at,
-        )
-        for find in rows
-    ]
-
-
 @router.post("/admin/poll", dependencies=[Depends(require_api_key)])
 async def trigger_poll() -> dict:
-    opportunities, edges, parlay_finds = await poll_and_scan()
+    opportunities, edges = await poll_and_scan()
     return {
         "opportunities_found": len(opportunities),
         "value_edges_found": len(edges),
-        "parlay_finds_found": len(parlay_finds),
     }

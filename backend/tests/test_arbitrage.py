@@ -96,8 +96,8 @@ def test_mismatched_market_or_line_raises():
     [
         (2.5, True, False),
         (2.0, True, True),
-        (2.25, False, False),
-        (2.75, False, False),
+        (2.25, True, False),
+        (2.75, True, False),
         (-1.5, True, False),
         (-1.0, True, True),
     ],
@@ -107,12 +107,83 @@ def test_line_support_and_push_classification(line, expected_supported, expected
     assert push_possible(MarketType.TOTALS, line) is expected_push
 
 
-def test_quarter_line_totals_excluded_from_arbitrage():
+# ---------------------------------------------------------------------
+# Quarter lines (.25/.75) — see app/engine/arbitrage.py module docstring
+# for the 3-bucket (decisive win / marginal half win-or-loss / decisive
+# loss) settlement model this exercises.
+# ---------------------------------------------------------------------
+
+
+def test_quarter_line_totals_generous_odds_found_as_arbitrage():
     quotes = [
         quote("BookA", MarketType.TOTALS, "over", 5.0, line=2.25),
         quote("BookB", MarketType.TOTALS, "under", 5.0, line=2.25),
     ]
+    result = find_arbitrage(quotes)
+    assert result is not None
+    assert result.is_arbitrage
+    assert result.margin_percent > 0
+    assert result.push_possible is False
+    assert result.stake_fractions is not None
+    assert sum(result.stake_fractions.values()) == pytest.approx(1.0)
+
+
+def test_quarter_line_single_book_normal_vig_never_an_arbitrage():
+    """A single book's own two sides of a quarter line, priced with
+    ordinary overround, must never look like an arbitrage -- same
+    invariant as the plain-partition markets."""
+    quotes = [
+        quote("Pinnacle", MarketType.ASIAN_HANDICAP, "home", 1.90, line=-0.25),
+        quote("Pinnacle", MarketType.ASIAN_HANDICAP, "away", 1.95, line=-0.25),
+    ]
+    result = find_arbitrage(quotes)
+    assert result is None or not result.is_arbitrage
+
+
+def test_quarter_line_incomplete_partition_returns_none():
+    quotes = [quote("BookA", MarketType.TOTALS, "over", 5.0, line=2.25)]
     assert find_arbitrage(quotes) is None
+
+
+def test_quarter_line_stake_plan_matches_worst_case_across_both_marginal_flavors():
+    """Cross-checks allocate_stakes' quarter-line stake split against an
+    independent brute-force simulation over every plausible match margin,
+    for both marginal flavors (.25 and .75) -- this is what proves the
+    solved-for split (not the naive 1/odds-proportional one) actually
+    achieves the worst-case profit ``margin_percent`` claims.
+    """
+
+    def settle_home(line: float, margin: int) -> tuple[float, float]:
+        c_lo, c_hi = line - 0.25, line + 0.25
+
+        def outcome(c: float) -> str:
+            v = margin + c
+            return "win" if v > 0 else ("lose" if v < 0 else "push")
+
+        results = [outcome(c_lo), outcome(c_hi)]
+        return (sum(0.5 for r in results if r == "win"), sum(0.5 for r in results if r == "push"))
+
+    def settle_away(line: float, margin: int) -> tuple[float, float]:
+        return settle_home(-line, -margin)
+
+    for line, odds_home, odds_away in [(-0.25, 2.05, 2.00), (0.75, 1.98, 2.15)]:
+        quotes = [
+            quote("BookA", MarketType.ASIAN_HANDICAP, "home", odds_home, line=line),
+            quote("BookB", MarketType.ASIAN_HANDICAP, "away", odds_away, line=line),
+        ]
+        result = find_arbitrage(quotes)
+        assert result is not None
+        plan = allocate_stakes(result, total_stake=1000.0)
+        stake_by_selection = {leg.selection: leg.stake for leg in plan.legs}
+
+        worst = min(
+            stake_by_selection["home"] * (w_h * odds_home + p_h)
+            + stake_by_selection["away"] * (w_a * odds_away + p_a)
+            for margin in range(-8, 9)
+            for (w_h, p_h) in [settle_home(line, margin)]
+            for (w_a, p_a) in [settle_away(line, margin)]
+        )
+        assert worst - 1000.0 == pytest.approx(plan.guaranteed_profit, abs=0.5)
 
 
 def test_whole_number_totals_line_flagged_as_push_possible():

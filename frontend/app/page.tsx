@@ -3,18 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Opportunity,
-  ParlayValueFind,
   StakePlan,
   ValueEdge,
   fetchOpportunities,
-  fetchParlayValue,
   fetchStakePlan,
   fetchValueEdges,
 } from "@/lib/api";
-
-type ValuePick =
-  | { kind: "single"; id: string; edge_percent: number; detected_at: string; data: ValueEdge }
-  | { kind: "parlay"; id: string; edge_percent: number; detected_at: string; data: ParlayValueFind };
 
 const REFRESH_MS = 15000;
 const THRESHOLD_KEY = "yb.notifyThreshold";
@@ -52,7 +46,7 @@ function playChime() {
 
 export default function Page() {
   const [opportunities, setOpportunities] = useState<Opportunity[] | null>(null);
-  const [valuePicks, setValuePicks] = useState<ValuePick[] | null>(null);
+  const [valuePicks, setValuePicks] = useState<ValueEdge[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newIds, setNewIds] = useState<Set<number>>(new Set());
   const [notifyEnabled, setNotifyEnabled] = useState(false);
@@ -94,11 +88,7 @@ export default function Page() {
 
     async function load() {
       try {
-        const [opps, edges, parlays] = await Promise.all([
-          fetchOpportunities(),
-          fetchValueEdges(),
-          fetchParlayValue(),
-        ]);
+        const [opps, edges] = await Promise.all([fetchOpportunities(), fetchValueEdges()]);
         if (cancelled) return;
 
         if (seenIds.current !== null) {
@@ -112,15 +102,10 @@ export default function Page() {
         }
         seenIds.current = new Set(opps.map((o) => o.id));
 
-        // 단폴더 가치 엣지 + 다폴더(파레이) 가치 픽을 한 피드로 섞어서
-        // 엣지% 기준으로 정렬 — "단폴더 & 다폴더 섞기"를 그대로 반영.
-        const merged: ValuePick[] = [
-          ...edges.map((e): ValuePick => ({ kind: "single", id: `single-${e.id}`, edge_percent: e.edge_percent, detected_at: e.detected_at, data: e })),
-          ...parlays.map((p): ValuePick => ({ kind: "parlay", id: `parlay-${p.id}`, edge_percent: p.edge_percent, detected_at: p.detected_at, data: p })),
-        ].sort((a, b) => b.edge_percent - a.edge_percent);
+        const sorted = [...edges].sort((a, b) => b.edge_percent - a.edge_percent);
 
         setOpportunities(opps);
-        setValuePicks(merged);
+        setValuePicks(sorted);
         setError(null);
       } catch (err) {
         if (!cancelled) setError((err as Error).message);
@@ -245,14 +230,13 @@ export default function Page() {
 
       <section>
         <div className="section-head">
-          <h2>가치 픽 (단폴더 + 다폴더)</h2>
+          <h2>가치 픽 (단폴더)</h2>
           <span className="count">{valuePicks?.length ?? 0}건</span>
         </div>
         <p className="hint">
-          단폴더 가치 엣지(정확한 스코어·승리마진, 같은 북메이커의 다른 라인끼리 가격 불일치)와
-          다폴더 가치 픽(서로 다른 경기를 묶은 파레이가 각 다리의 시장 최고가 기준 공정확률보다
-          후하게 가격이 매겨진 경우)을 엣지% 순으로 한 피드에 섞었습니다.{" "}
-          <strong>확정 수익이 아닙니다</strong> — 참고용 순위표로만 활용하세요.
+          정확한 스코어·승리마진 등 노출가 높은 마켓과, 같은 북메이커의 다른 라인끼리 가격이
+          어긋나는 경우를 엣지% 순으로 보여줍니다. <strong>확정 수익이 아닙니다</strong> —
+          참고용 순위표로만 활용하세요.
         </p>
         {valuePicks === null ? (
           <div className="empty">불러오는 중…</div>
@@ -260,13 +244,9 @@ export default function Page() {
           <div className="empty">기준치 이상의 가치 픽이 없어요.</div>
         ) : (
           <div className="pick-grid">
-            {valuePicks.map((pick) =>
-              pick.kind === "single" ? (
-                <ValueEdgeBox key={pick.id} edge={pick.data} />
-              ) : (
-                <ParlayBox key={pick.id} find={pick.data} />
-              )
-            )}
+            {valuePicks.map((edge) => (
+              <ValueEdgeBox key={edge.id} edge={edge} />
+            ))}
           </div>
         )}
       </section>
@@ -418,42 +398,6 @@ function ValueEdgeBox({ edge }: { edge: ValueEdge }) {
       <div className="pick-actions">
         <span className="badge not-guaranteed">확정 아님</span>
         <time>{new Date(edge.detected_at).toLocaleTimeString("ko-KR")}</time>
-      </div>
-    </div>
-  );
-}
-
-function ParlayBox({ find }: { find: ParlayValueFind }) {
-  return (
-    <div className="pick-box value-tone">
-      <div className="pick-top">
-        <div>
-          <div className="pick-event">{find.bookmaker}</div>
-          <div className="pick-meta">
-            <span>{find.legs.length}다리 다폴더</span>
-            <span>·</span>
-            <span>합산 배당 {find.combined_odds.toFixed(2)}</span>
-          </div>
-        </div>
-        <div className="pick-margin">
-          <div className="num small">+{find.edge_percent.toFixed(1)}%</div>
-          <div className="cap">모델 엣지</div>
-        </div>
-      </div>
-      <div className="legs-strip">
-        {find.legs.map((leg, i) => (
-          <span className="leg-chip" key={`${leg.event_label}-${i}`}>
-            <span className="sel">{leg.event_label}</span>
-            <span className="book">
-              {marketLabel(leg.market, leg.line)} {leg.selection}
-            </span>
-            <span className="odds">{leg.decimal_odds.toFixed(2)}</span>
-          </span>
-        ))}
-      </div>
-      <div className="pick-actions">
-        <span className="badge not-guaranteed">확정 아님</span>
-        <time>{new Date(find.detected_at).toLocaleTimeString("ko-KR")}</time>
       </div>
     </div>
   );

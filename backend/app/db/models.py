@@ -77,6 +77,11 @@ class ArbitrageOpportunity(Base):
     margin_percent: Mapped[float] = mapped_column(Float)
     push_possible: Mapped[bool] = mapped_column(Boolean, default=False)
     legs_json: Mapped[str] = mapped_column(Text)  # JSON list of {selection, bookmaker, decimal_odds}
+    # JSON {selection: stake_fraction} — only set for quarter-line (.25/.75)
+    # Asian Handicap/Totals opportunities, whose correct stake split isn't
+    # the naive 1/odds-proportional one (see app/engine/arbitrage.py). Null
+    # for every other market/line, which fall back to that naive split.
+    stake_fractions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     event: Mapped[Event] = relationship()
@@ -106,27 +111,6 @@ class ValueEdge(Base):
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     event: Mapped[Event] = relationship()
-
-
-class ParlayValueFind(Base):
-    """A cross-match parlay (다폴더) whose combined price at one bookmaker
-    clears the market's best-available-anywhere fair probability for
-    every leg. NOT arbitrage, NOT guaranteed profit — see
-    app/engine/parlay.py module docstring. Spans multiple events, so
-    (unlike ArbitrageOpportunity/ValueEdge) there's no single event_id;
-    each leg's own event is denormalized into ``legs_json`` instead.
-    """
-
-    __tablename__ = "parlay_value_finds"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    bookmaker: Mapped[str] = mapped_column(String(64))
-    combined_odds: Mapped[float] = mapped_column(Float)
-    combined_fair_probability: Mapped[float] = mapped_column(Float)
-    edge_percent: Mapped[float] = mapped_column(Float)
-    legs_json: Mapped[str] = mapped_column(Text)
-    # JSON list of {event_label, market, line, selection, decimal_odds, fair_probability}
-    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class User(Base):

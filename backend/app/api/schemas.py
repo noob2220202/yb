@@ -57,23 +57,3 @@ class ValueEdgeOut(BaseModel):
     detected_at: datetime
 
 
-class ParlayLegOut(BaseModel):
-    event_label: str
-    market: str
-    line: float | None
-    selection: str
-    bookmaker: str
-    decimal_odds: float
-    fair_probability: float
-
-
-class ParlayValueFindOut(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-
-    id: int
-    bookmaker: str
-    combined_odds: float
-    combined_fair_probability: float
-    edge_percent: float
-    legs: list[ParlayLegOut]
-    detected_at: datetime

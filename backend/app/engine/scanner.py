@@ -15,15 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import MarketType
 from app.core.schemas import NormalizedEvent, OddsQuote
-from app.db.models import ArbitrageOpportunity, Bookmaker, Event, OddsSnapshot, ParlayValueFind, ValueEdge
-from app.engine import parlay as parlay_engine
+from app.db.models import ArbitrageOpportunity, Bookmaker, Event, OddsSnapshot, ValueEdge
 from app.engine import scoreline_model
-from app.engine.arbitrage import find_arbitrage
+from app.engine.arbitrage import find_arbitrage, is_quarter_line
 
 logger = logging.getLogger(__name__)
 
 MIN_VALUE_EDGE_PERCENT = 2.0
-MIN_PARLAY_EDGE_PERCENT = 5.0
 PREFERRED_TOTALS_LINE = 2.5
 
 
@@ -119,6 +117,7 @@ async def scan_arbitrage(session: AsyncSession, quotes: list[OddsQuote]) -> list
             margin_percent=result.margin_percent,
             push_possible=result.push_possible,
             legs_json=legs_json,
+            stake_fractions_json=json.dumps(result.stake_fractions) if result.stake_fractions is not None else None,
             detected_at=datetime.now(timezone.utc),
         )
         session.add(opportunity)
@@ -186,15 +185,22 @@ async def scan_value_edges(session: AsyncSession, quotes: list[OddsQuote]) -> li
         margin_quotes = [
             (q.bookmaker, q.selection, q.decimal_odds) for q in event_quotes if q.market == MarketType.WINNING_MARGIN
         ]
+        # Quarter lines (.25/.75) are excluded here: scoreline_model's
+        # totals_probabilities/handicap_probabilities only know binary
+        # win/push/lose, which mis-prices a quarter line's real 3-bucket
+        # settlement (decisive win / marginal half win-or-loss / decisive
+        # loss — see app/engine/arbitrage.py's module docstring). The
+        # arbitrage engine models quarter lines correctly on its own; this
+        # value-edge path just skips them rather than silently guessing.
         totals_quotes = [
             (q.bookmaker, q.line, q.selection, q.decimal_odds)
             for q in event_quotes
-            if q.market == MarketType.TOTALS and q.line is not None
+            if q.market == MarketType.TOTALS and q.line is not None and not is_quarter_line(q.market, q.line)
         ]
         handicap_quotes = [
             (q.bookmaker, q.line, q.selection, q.decimal_odds)
             for q in event_quotes
-            if q.market == MarketType.ASIAN_HANDICAP and q.line is not None
+            if q.market == MarketType.ASIAN_HANDICAP and q.line is not None and not is_quarter_line(q.market, q.line)
         ]
 
         try:
@@ -262,57 +268,10 @@ async def scan_value_edges(session: AsyncSession, quotes: list[OddsQuote]) -> li
     return edges
 
 
-async def scan_parlay_value(session: AsyncSession, quotes: list[OddsQuote]) -> list[ParlayValueFind]:
-    """Cross-match parlay (다폴더) value scan — see app/engine/parlay.py
-    module docstring for the method and its (deliberate) limits. Not
-    arbitrage, not guaranteed profit; mixed into the same "value" family
-    as ValueEdge in the API/dashboard/Telegram feeds.
-    """
-    try:
-        candidates = parlay_engine.build_parlay_candidates(quotes)
-        found = parlay_engine.find_parlay_value(candidates, min_edge_percent=MIN_PARLAY_EDGE_PERCENT)
-    except Exception:
-        # A bug here must never cost the arbitrage/value-edge results from
-        # the same cycle.
-        logger.exception("parlay value scan failed")
-        return []
-
-    finds: list[ParlayValueFind] = []
-    for result in found:
-        legs_json = json.dumps(
-            [
-                {
-                    "event_label": leg.event_label,
-                    "market": leg.market.value,
-                    "line": leg.line,
-                    "selection": leg.selection,
-                    "bookmaker": leg.bookmaker,
-                    "decimal_odds": leg.decimal_odds,
-                    "fair_probability": leg.fair_probability,
-                }
-                for leg in result.legs
-            ]
-        )
-        record = ParlayValueFind(
-            bookmaker=result.bookmaker,
-            combined_odds=result.combined_odds,
-            combined_fair_probability=result.combined_fair_probability,
-            edge_percent=result.edge_percent,
-            legs_json=legs_json,
-            detected_at=datetime.now(timezone.utc),
-        )
-        session.add(record)
-        finds.append(record)
-
-    await session.commit()
-    return finds
-
-
 async def run_scan_cycle(
     session: AsyncSession, quotes: list[OddsQuote], source: str
-) -> tuple[list[ArbitrageOpportunity], list[ValueEdge], list[ParlayValueFind]]:
+) -> tuple[list[ArbitrageOpportunity], list[ValueEdge]]:
     await store_quotes(session, quotes, source)
     opportunities = await scan_arbitrage(session, quotes)
     edges = await scan_value_edges(session, quotes)
-    parlay_finds = await scan_parlay_value(session, quotes)
-    return opportunities, edges, parlay_finds
+    return opportunities, edges

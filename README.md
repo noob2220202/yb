@@ -3,22 +3,26 @@
 A SaaS scaffold that pulls odds from multiple bookmakers and finds:
 
 1. **Guaranteed-profit arbitrage** across core markets (moneyline/1X2, totals,
-   Asian handicap) — the same event & market priced differently enough
+   Asian handicap — including quarter lines like -0.25/-1.75, see "쿼터
+   라인" below) — the same event & market priced differently enough
    across independent books that betting every outcome locks in a profit no
    matter the result.
 2. **Value edges** — a Poisson/Dixon-Coles scoreline model flags prices
    that diverge from its own probability estimate, two ways: exotic
-   markets (correct score, winning margin) priced by any book, and a
+   markets (correct score, BTTS) priced by any book, and a
    single book's OWN secondary Totals/Asian-Handicap lines disagreeing
    with its own primary-line-calibrated model (works with just one
    provider — see "피나클만 쓰는 경우" below). **Neither is guaranteed
    profit**, it's a ranked shortlist of positive-EV bets (see caveat
    below).
-3. **Parlay (다폴더) value picks** — cross-match combos (never same-game)
-   whose combined price at one bookmaker beats the market's best-available
-   fair probability for every leg. Same "value, not guaranteed" family as
-   above; the dashboard/API/Telegram mix single-leg and multi-leg finds
-   into one ranked feed. See "다폴더(파레이) 가치 픽" below.
+
+Cross-match parlays (다폴더) are deliberately NOT built here — combining
+independent matches into one bet slip can only ever compound each match's
+own vig, never remove it; the only way a parlay combo becomes truly
+guaranteed is if every leg already has its own single-match arbitrage, in
+which case combining them adds no benefit and only fragments capital
+across exponentially many slips. See "왜 다폴더가 없는지" below for the
+full reasoning.
 
 ## Read this before you rely on it
 
@@ -26,11 +30,14 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
   (e.g. Pinnacle alone) can never be arbed against itself. The core
   arbitrage engine only fires when it has best-odds quotes for every
   outcome of a market from possibly-different books.
-- **Correct score / winning margin are not risk-free.** Bookmakers rarely
+- **Correct score / BTTS are not risk-free.** Bookmakers rarely
   quote those identically enough for true arbitrage, so the exotic-market
   scanner instead compares its own scoreline model's probabilities against
   quoted prices. A flagged "edge" can still lose — treat it as a shortlist
-  for a human to review, never as an auto-bet signal.
+  for a human to review, never as an auto-bet signal. (`winning_margin` is
+  still defined in the type system and the scoreline model can price it,
+  but no configured provider actually fetches that market — see
+  "마켓 커버리지" below.)
 - **Scraping bookmaker websites directly is usually a ToS violation** and
   an ongoing anti-bot arms race. This project only talks to official,
   documented APIs (Pinnacle's own API, The Odds API). If you plug in more
@@ -80,29 +87,74 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
 정확히 이런 불일치를 최소화하도록 운영되는 북메이커라 발견 빈도는 낮을 것으로
 예상됩니다** — 그게 정상입니다.
 
-## 다폴더(파레이) 가치 픽
+## 왜 다폴더가 없는지
 
-`app/engine/parlay.py`가 서로 다른 경기를 묶은 전통적 크로스매치 파레이만
-다룹니다 (같은 경기 내 마켓을 묶는 세임게임 파레이는 다리끼리 상관관계가
-생겨서 별도 모델링이 필요해 의도적으로 빠졌습니다). 방식:
+이 프로젝트는 의도적으로 **다폴더(파레이)를 전혀 다루지 않습니다** — 크로스매치
+파레이든 세임게임 파레이든. 이유는 단순한 스코프 문제가 아니라 수학적입니다:
 
-1. 각 다리의 "공정 확률"은 **그 마켓에서 어디서든 구할 수 있는 최고 배당**을
-   proportional devig해서 구합니다 (특정 북메이커 자체 확률이 아님).
-2. 파레이 **가격**은 항상 **한 북메이커 자신의** 다리별 배당을 곱한 값입니다 —
-   실제 파레이 티켓은 한 북메이커에서만 넣을 수 있으니까요 (곱셈 방식,
-   실제 파레이 API 가격은 안 가져옴).
-3. `공정확률 곱 × 그 북메이커의 파레이 배당 − 1`이 임계값(기본 5%) 이상이면
-   "가치 있는 다폴더"로 표시.
+- 다폴더의 배당은 각 다리 배당의 곱이고, 각 북메이커의 마진(vig)도 다리 수만큼
+  **곱으로 누적**됩니다. 즉 다폴더로 묶는다고 마진이 사라지지 않고, 오히려
+  압축(compound)됩니다.
+- 이미 각 경기가 개별적으로 아비트리지가 성립한다면, 그 경기들을 다폴더로
+  묶어봤자 수학적으로 이득이 전혀 없습니다 (같은 총수익을 훨씬 더 복잡하고
+  자본이 여러 슬립에 쪼개지는 방식으로 얻을 뿐).
+- 반대로 각 경기가 개별적으로 아비트리지가 없다면(즉 정상적인 마진이 걸린
+  시장이라면), 그 경기를 다폴더에 포함시키는 순간 전체 조합의 기대값은
+  반드시 더 나빠집니다.
+- "모든 결과를 커버하는 다폴더 조합"으로 승률 자체를 100%로 만드는 것도
+  가능은 하지만, 그러면 배당 합이 마진 때문에 항상 1 미만이 되어 **승률
+  100%·손실 100% 보장**이라는 자기모순적인 결과만 나옵니다.
 
-한 북메이커만 있으면(피나클만 쓰는 경우) 이 스캐너도 절대 발견이 안 됩니다 —
-자기 자신의 배당으로 자기 자신의 공정확률을 만들면 항상 자기 마진만큼
-손해로 나오기 때문입니다 (단폴더 아비트리지가 북메이커 2개 필요한 것과
-같은 이유). Odds API를 붙이면(위 권장 경로) 자동으로 작동합니다.
+정리하면: 다폴더+단폴더, 다폴더+다폴더 조합으로 단폴더 아비트리지보다 나은
+승률/수익을 만들 수 있는 방법은 존재하지 않습니다. 그래서 이 프로젝트는
+`app/engine/arbitrage.py`의 단폴더(단일 경기, 두 개 이상의 북메이커) 아비트리지
+하나에만 집중합니다 — 이게 유일하게 진짜 "확정 수익"이 성립하는 경우입니다.
 
-**안 만든 것**: 다폴더끼리, 혹은 다폴더+단폴더를 조합해서 결과와 무관하게
-확정 수익이 나도록 헤지하는 기능. 이건 2^N개의 상호보완적 파레이 조합을
-전부 커버하거나, 사용자가 실제로 넣은 특정 베팅을 추적해야 하는 별도의
-(훨씬 복잡한) 기능이라 이번엔 범위에서 뺐습니다.
+## 쿼터 라인 (아시안 핸디캡/토탈스 .25 · .75)
+
+일반 정수/반정수 라인(0, ±0.5, ±1.5 ...)과 달리, 쿼터 라인(-0.25, -0.75, +1.75
+등)은 스테이크가 인접한 두 반정수 라인에 절반씩 나뉘어 걸리는 것과 동일하게
+정산됩니다. 그 결과 가능한 결과가 (완승 / 반반(마진) / 완패) 세 가지이고, 그
+"마진" 버킷은 정수 라인의 전액 푸시(환불)와 달리 **절반은 환불, 절반은 실제로
+이기거나 진다**는 점이 다릅니다 (예: -0.25에서 무승부면 절반 손실; -0.75에서
+1점차 승리면 절반 승리 — 실제 북메이커의 쿼터 라인 정산 규칙 그대로).
+
+`app/engine/arbitrage.py`가 이 세 버킷의 최악의 경우 수익을 정확히 계산해서
+(단순 `sum(1/odds) < 1` 공식이 아니라, 두 다리의 스테이크 배분을 직접 최적화)
+쿼터 라인도 이제 확정 수익 스캐너에 포함됩니다 — 예전에는 아예 제외되던
+라인들이라, 실제 북메이커들이 흔히 쓰는 쿼터 라인만큼 발견 가능한 기회가
+늘어납니다. (이 3버킷 모델은 정수 개의 시뮬레이션으로 교차 검증했습니다.)
+
+단, 같은 계산을 단순화한 이항(win/push/lose) 모델을 쓰는
+`scoreline_model.find_cross_line_edges`(가치 베팅 엣지 쪽)는 쿼터 라인을
+정확히 모델링하지 못하므로 그쪽 스캐너에서는 쿼터 라인을 제외합니다 — 잘못된
+근사치보다는 아예 안 보여주는 쪽을 택했습니다.
+
+## 마켓 커버리지 (축구)
+
+| 마켓 | 확정 수익 엔진 | 가치 베팅 엔진 | 실데이터 수집 |
+|---|---|---|---|
+| 승무패 / 핸디캡(정수·반정수) / 오버언더 | ✅ | ✅ | ✅ Pinnacle, Odds API |
+| 아시안 핸디캡/토탈스 쿼터 라인(.25/.75) | ✅ | 제외(위 참고) | ❌ (아래 참고) |
+| 양팀득점(BTTS) | ✅ | — | ✅ Odds API (`btts` 마켓) |
+| 정확한 스코어 | — | ✅ | ✅ Odds API (`correct_score` 마켓, 아래 참고) |
+| 몇점차승리(winning margin) | — | ✅ | ❌ 알려진 제공자 없음 |
+
+`OddsApiProvider`가 `btts`/`correct_score`를 요청·파싱하도록 추가했습니다
+(The Odds API 공식 마켓 키로 확인됨). `correct_score`는 응답의 정확한
+`outcomes[].name` 포맷을 실제 유료 응답으로 검증하지 못해 — 정규식으로 두 개의
+정수를 뽑아 "H-A"로 매핑하는 최선 추정(best-effort) 파서입니다; 실 계정으로
+한 번 검증 후 필요하면 조정하세요. `winning_margin`은 Pinnacle/Odds API 어디에도
+표준 마켓 키가 없어 실데이터 연결을 붙이지 않았습니다 (타입 시스템·스코어라인
+모델은 계속 지원하지만, 항상 빈 상태일 것입니다).
+
+Pinnacle의 correct score/BTTS/margin은 `/v1/odds/special` 이라는 별도
+엔드포인트로만 노출되는데, 이 엔드포인트는 자유 형식 `category`/`name`
+문자열로 마켓을 표현해서 (예: `"Will the 4th quarter be odd or even?"`)
+실제 응답 샘플 없이는 안전하게 파싱할 방법을 검증할 수 없습니다. 게다가
+Pinnacle 신규 API 승인 자체가 2025-07-23부로 막혀 있어 이 세션에서는 특수
+마켓 연동을 시도하지 않았습니다 — 잘못 파싱해서 스코어를 틀리게 표시하는
+것보다는 아예 안 붙이는 쪽이 안전합니다.
 
 ## Architecture
 
@@ -116,9 +168,9 @@ backend/            FastAPI service
     oddsapi.py        The Odds API adapter (aggregates many bookmakers)
   app/engine/
     arbitrage.py       Core N-outcome arbitrage math + stake allocator
+                       (incl. quarter-line .25/.75 settlement — see below)
     scoreline_model.py Poisson/Dixon-Coles calibration + value-edge finder
-    parlay.py          Cross-match parlay (다폴더) value scanner
-    scanner.py         Orchestrates persistence + all three scans per poll cycle
+    scanner.py         Orchestrates persistence + both scans per poll cycle
   app/db/             SQLAlchemy models (async, Postgres in prod / SQLite in tests)
   app/api/            REST routes, API-key auth
   app/scheduler.py     APScheduler polling loop — merges every configured
@@ -141,9 +193,8 @@ docker-compose.yml    postgres + backend + frontend (선택사항 — 로컬은 
 
 각 아비트리지 기회는 표가 아니라 **픽 박스**(카드)로 표시되어 이벤트·마켓·마진·다리별
 배당을 한눈에 보여주고, 새로 감지된 픽은 잠깐 민트색 테두리로 하이라이트됩니다.
-"가치 픽" 섹션은 단폴더 가치 엣지와 다폴더 가치 픽을 엣지% 기준 하나의 피드로
-섞어서 보여줍니다 — 다리가 1개면 기존 카드, 여러 개면 다리별 칩이 늘어난 카드로
-표시됩니다.
+"가치 픽" 섹션은 단폴더 가치 엣지(정확한 스코어·BTTS, 같은 북메이커 크로스라인
+불일치)를 엣지% 순으로 보여줍니다.
 우측 상단 "🔔 알림 켜기"를 누르면 브라우저 권한을 요청하고, 이후 설정한 마진(%) 이상의
 확정픽이 새로 뜰 때마다 OS 알림 + 소리(사인파 차임, 별도 음원 파일 불필요)로 알려줍니다.
 임계값은 브라우저 `localStorage`에 저장됩니다.
@@ -291,11 +342,10 @@ TELEGRAM_BOT_TOKEN=<@BotFather 로 발급받은 토큰>
 TELEGRAM_CHAT_ID=<봇과 대화한 채팅 ID>
 TELEGRAM_MIN_MARGIN_PERCENT=1.0        # 확정 수익 픽: 이 마진(%) 이상만 알림
 TELEGRAM_MIN_EDGE_PERCENT=3.0          # 단폴더 가치 엣지: 이 모델 엣지(%) 이상만 알림
-TELEGRAM_MIN_PARLAY_EDGE_PERCENT=8.0   # 다폴더 가치 픽: 다리가 여러 개라 임계값을 더 높게
 ```
 
 매 폴링 사이클마다 **새로 나타난** 것만(이미 알림을 보낸, 여전히 살아있는 픽/엣지는
-재알림하지 않음) 박스별로 정리해 채널 세 개로 나눠 보냅니다:
+재알림하지 않음) 박스별로 정리해 채널 두 개로 나눠 보냅니다:
 
 ```
 🎯 확정 수익 픽 2건 발견
@@ -318,30 +368,19 @@ TELEGRAM_MIN_PARLAY_EDGE_PERCENT=8.0   # 다폴더 가치 픽: 다리가 여러 
 Pinnacle @ 4.72  (모델 엣지 +35.0%)
 ```
 
-```
-🧩 다폴더 가치 픽 1건 발견 (확정 수익 아님)
-
-[1] SoftBook · 3다리 다폴더
-  ▸ Arsenal vs Chelsea: home @ SoftBook  2.30
-  ▸ Man City vs Newcastle: home @ SoftBook  2.30
-  ▸ Liverpool vs Spurs: home @ SoftBook  2.30
-합산 배당 12.17  (모델 엣지 +17.5%)
-```
-
 피나클만 설정한 경우 첫 번째 채널은 거의 항상 비어 있고(정상입니다 — "피나클만 쓰는
-경우" 참고), 두 번째 채널이 실질적으로 계속 오는 알림이 됩니다. 세 번째(다폴더)
-채널도 마찬가지로 독립적인 두 번째 북메이커가 있어야 의미 있게 작동합니다.
+경우" 참고), 두 번째 채널이 실질적으로 계속 오는 알림이 됩니다.
 
 ## Current scope / what's next
 
 Shipped: core-market arbitrage (1X2, 2-way moneyline, totals, Asian
-handicap, BTTS), push-aware math, stake calculator, value-edge model
-(exotic markets + same-book cross-line consistency — works with just
-Pinnacle), cross-match parlay (다폴더) value scanner mixed into the same
-feed as single-leg value edges, API-key auth, live pick-box dashboard,
-신규 확정픽 브라우저 알림(+소리), 확정픽/가치엣지/다폴더 각각 별도 채널의
+handicap incl. quarter lines, BTTS), push-aware math, stake calculator,
+value-edge model (exotic markets + same-book cross-line consistency —
+works with just Pinnacle), API-key auth, live pick-box dashboard,
+신규 확정픽 브라우저 알림(+소리), 확정픽/가치엣지 각각 별도 채널의
 텔레그램 서버 사이드 알림, 크로스 프로바이더 아비트리지 병합,
-dummy-data-free (설정 안 하면 빈 화면).
+dummy-data-free (설정 안 하면 빈 화면). 다폴더(파레이)는 의도적으로 없음 — 위
+"왜 다폴더가 없는지" 참고.
 
 Still blocking real use (see "실데이터 연결" above), in priority order:
 1. `ODDS_API_KEY` 구독 (Business 플랜, $99/월) — 이게 있어야 실제로 뭔가 뜸.
@@ -354,8 +393,8 @@ Still blocking real use (see "실데이터 연결" above), in priority order:
 Not built yet (natural next steps, intentionally out of scope for this
 MVP): user signup/billing (Stripe), DB migrations (Alembic — currently
 `create_all` on startup), more sports/markets, odds history charts,
-same-game parlays (correlated legs, needs different modeling than
-`app/engine/parlay.py`'s cross-match-only approach), parlay/single
-hedging for guaranteed outcomes, per-user bookmaker account management
-for actually placing bets (this scaffold only surfaces opportunities, it
-never places a bet for you).
+per-user bookmaker account management for actually placing bets (this
+scaffold only surfaces opportunities, it never places a bet for you).
+Parlays (same-game or cross-match) are not a "not built yet" — see "왜
+다폴더가 없는지" above for why that's a deliberate, permanent choice
+rather than a missing feature.

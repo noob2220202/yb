@@ -19,9 +19,33 @@ a genuine partition of what can happen (see ``expected_selections`` and
    than as an unconditional win.
 
 2. **Quarter lines** (e.g. -0.25, -0.75) split a stake across two
-   half-lines with independent win/push outcomes each, which this simple
-   model cannot represent correctly — those are excluded outright
-   (``is_supported_line`` returns False) rather than silently mis-priced.
+   half-lines, each with its own independent win/push outcome. Unlike a
+   whole-number line's single push, this has THREE possible settlements,
+   not two:
+
+   - decisive win (both halves win)
+   - decisive loss (both halves lose)
+   - a "marginal" outcome where one half pushes (refunds) and the other
+     half either wins or loses on its own — a genuine partial win/loss,
+     not a push of the whole stake.
+
+   Concretely, decompose line ``L`` into its two half-step components
+   ``c_lo = L - 0.25`` and ``c_hi = L + 0.25`` (both multiples of 0.5).
+   Exactly one of them is a whole number (the one that can push); the
+   other is a half-line (never pushes). Whichever fractional part ``L``
+   has (``.25`` vs ``.75``, via floor-mod so sign is handled correctly)
+   determines whether the home/over side's marginal outcome is a HALF WIN
+   or a HALF LOSS — see ``_home_marginal_is_half_win``. This is exactly
+   the well-known real-world behaviour of quarter Asian Handicap/Totals
+   lines (e.g. -0.25 loses half the stake on a draw; -0.75 wins half the
+   stake when the home side wins by exactly 1).
+
+   Because the marginal bucket's payout isn't simply "refund" (unlike a
+   whole-number push), the classic ``sum(1/odds) < 1`` shortcut doesn't
+   apply directly — the stake split between the two sides has to be
+   solved for the allocation that maximizes the WORST of the three
+   bucket payouts (see ``_quarter_line_worst_case``), not the simple
+   proportional-to-1/odds split used for clean partitions.
 """
 
 from __future__ import annotations
@@ -46,7 +70,20 @@ def expected_selections(market: MarketType) -> frozenset[str]:
 
 
 def _line_fraction(line: float) -> float:
+    """Absolute fractional part — fine for checking *whether* a line is a
+    whole/half/quarter number, since 0.0/0.5 and .25/.75 are each
+    symmetric under sign. Do NOT use this to determine quarter-line
+    *flavor* (half-win vs half-loss) — that needs the sign-aware
+    ``_signed_line_fraction`` below.
+    """
     return round(abs(line) % 1, 2)
+
+
+def _signed_line_fraction(line: float) -> float:
+    """Floor-mod fractional part, always in [0, 1) — distinguishes e.g.
+    -0.25 (0.75) from +0.25 (0.25), which matters for quarter-line
+    settlement (see module docstring)."""
+    return round(line % 1.0, 2)
 
 
 def is_supported_line(market: MarketType, line: float | None) -> bool:
@@ -55,15 +92,96 @@ def is_supported_line(market: MarketType, line: float | None) -> bool:
         return True
     if line is None:
         return False
-    return _line_fraction(line) in (0.0, 0.5)
+    return _line_fraction(line) in (0.0, 0.25, 0.5, 0.75)
+
+
+def is_quarter_line(market: MarketType, line: float | None) -> bool:
+    if market not in (MarketType.TOTALS, MarketType.ASIAN_HANDICAP):
+        return False
+    if line is None:
+        return False
+    return _line_fraction(line) in (0.25, 0.75)
 
 
 def push_possible(market: MarketType, line: float | None) -> bool:
+    """Whole-stake push risk — only whole-number lines. Quarter lines have
+    a different (partial) marginal outcome, already fully priced into
+    ``ArbitrageResult.margin_percent`` for them (see
+    ``_quarter_line_worst_case``), so this is correctly False for them:
+    there's no separate caveat left to flag."""
     if market not in (MarketType.TOTALS, MarketType.ASIAN_HANDICAP):
         return False
     if line is None:
         return False
     return _line_fraction(line) == 0.0
+
+
+def _home_marginal_is_half_win(line: float) -> bool:
+    """Whether the home/over side's marginal (one-half-pushes) outcome on
+    a quarter line is a half WIN (vs half LOSS) — see module docstring
+    for the derivation. E.g. home -0.25 half-loses on a draw (False here);
+    home -0.75 half-wins when winning by exactly 1 (True here)."""
+    return _signed_line_fraction(line) == 0.25
+
+
+def _quarter_line_worst_case(
+    odds_a: float, odds_b: float, a_marginal_is_half_win: bool
+) -> tuple[float, float]:
+    """For a quarter-line market's two sides (``a`` = home/over, ``b`` =
+    away/under, same line, unit total stake split as ``s_a`` / ``1 -
+    s_a``), returns ``(best_s_a, worst_case_profit_fraction)`` — the
+    stake split that maximizes the worst of the three possible bucket
+    payouts, and that worst-case profit as a fraction of stake.
+
+    The three payout curves (decisive-a-win, marginal, decisive-b-win) are
+    each affine in ``s_a``, so the max-min is found either at a boundary
+    (``s_a`` in {0, 1}) or where two of the curves cross — no numerical
+    optimizer needed, just evaluate every candidate crossing.
+    """
+
+    def payouts(s_a: float) -> tuple[float, float, float]:
+        s_b = 1.0 - s_a
+        decisive_a = s_a * odds_a
+        decisive_b = s_b * odds_b
+        if a_marginal_is_half_win:
+            marginal = 0.5 * s_a * (odds_a + 1.0) + 0.5 * s_b
+        else:
+            marginal = 0.5 * s_a + 0.5 * s_b * (odds_b + 1.0)
+        return decisive_a, marginal, decisive_b
+
+    # decisive_a(s) = odds_a * s
+    # decisive_b(s) = odds_b - odds_b * s
+    # marginal(s)   = m_slope * s + m_intercept
+    if a_marginal_is_half_win:
+        m_slope = 0.5 * (odds_a + 1.0) - 0.5
+        m_intercept = 0.5
+    else:
+        m_slope = 0.5 - 0.5 * (odds_b + 1.0)
+        m_intercept = 0.5 * (odds_b + 1.0)
+
+    def intersection(slope1: float, intercept1: float, slope2: float, intercept2: float) -> float | None:
+        if abs(slope1 - slope2) < 1e-12:
+            return None
+        s = (intercept2 - intercept1) / (slope1 - slope2)
+        return s if 0.0 <= s <= 1.0 else None
+
+    candidates = {0.0, 1.0}
+    for s in (
+        intersection(odds_a, 0.0, -odds_b, odds_b),
+        intersection(odds_a, 0.0, m_slope, m_intercept),
+        intersection(-odds_b, odds_b, m_slope, m_intercept),
+    ):
+        if s is not None:
+            candidates.add(s)
+
+    best_s = 0.0
+    best_worst_case = float("-inf")
+    for s in candidates:
+        worst = min(payouts(s))
+        if worst > best_worst_case:
+            best_worst_case = worst
+            best_s = s
+    return best_s, best_worst_case - 1.0
 
 
 @dataclass(frozen=True)
@@ -80,6 +198,14 @@ class ArbitrageResult:
     legs: tuple[Leg, ...]
     total_implied_probability: float
     push_possible: bool
+    # Only set for quarter-line results: {selection: stake_fraction},
+    # summing to 1.0. The naive 1/odds-proportional split (used when this
+    # is None) doesn't account for the marginal bucket's partial-win/loss
+    # payout, so quarter lines need their own solved-for split — see
+    # ``_quarter_line_worst_case``. Persisted alongside the opportunity
+    # (``ArbitrageOpportunity.stake_fractions_json``) so a later
+    # stake-plan request can reconstruct it exactly.
+    stake_fractions: dict[str, float] | None = None
 
     @property
     def is_arbitrage(self) -> bool:
@@ -95,9 +221,6 @@ def best_odds_per_selection(quotes: Iterable[OddsQuote], required: frozenset[str
     """Picks the best (highest) odds per selection across every quote in
     ``quotes`` for one (event, market, line) group. Returns ``None`` if
     any of ``required`` has no quote at all (an incomplete partition).
-    Shared by ``find_arbitrage`` and the parlay value scanner, which both
-    need "the best price anywhere for this exact outcome" as a building
-    block.
     """
     best: dict[str, OddsQuote] = {}
     for q in quotes:
@@ -140,6 +263,9 @@ def find_arbitrage(quotes: Iterable[OddsQuote]) -> ArbitrageResult | None:
     if best is None:
         return None
 
+    if is_quarter_line(market, line):
+        return _find_quarter_line_arbitrage(market, line, best)
+
     total_implied = sum(1.0 / q.decimal_odds for q in best.values())
     legs = tuple(
         Leg(selection=q.selection, bookmaker=q.bookmaker, decimal_odds=q.decimal_odds)
@@ -151,6 +277,37 @@ def find_arbitrage(quotes: Iterable[OddsQuote]) -> ArbitrageResult | None:
         legs=legs,
         total_implied_probability=total_implied,
         push_possible=push_possible(market, line),
+    )
+
+
+def _find_quarter_line_arbitrage(
+    market: MarketType, line: float, best: dict[str, OddsQuote]
+) -> ArbitrageResult | None:
+    """Quarter-line (.25/.75) counterpart to the plain-partition path
+    above — see module docstring for the settlement model. ``best`` must
+    have exactly the two sides of a two-way market (home/away or
+    over/under, whichever ``market`` expects)."""
+    side_a, side_b = ("home", "away") if market == MarketType.ASIAN_HANDICAP else ("over", "under")
+    quote_a, quote_b = best.get(side_a), best.get(side_b)
+    if quote_a is None or quote_b is None:
+        return None
+
+    a_half_win = _home_marginal_is_half_win(line)
+    stake_a, worst_case_profit = _quarter_line_worst_case(quote_a.decimal_odds, quote_b.decimal_odds, a_half_win)
+    if worst_case_profit <= 0:
+        return None
+
+    legs = (
+        Leg(selection=side_a, bookmaker=quote_a.bookmaker, decimal_odds=quote_a.decimal_odds),
+        Leg(selection=side_b, bookmaker=quote_b.bookmaker, decimal_odds=quote_b.decimal_odds),
+    )
+    return ArbitrageResult(
+        market=market,
+        line=line,
+        legs=legs,
+        total_implied_probability=1.0 / (1.0 + worst_case_profit),
+        push_possible=False,
+        stake_fractions={side_a: stake_a, side_b: 1.0 - stake_a},
     )
 
 
@@ -184,7 +341,11 @@ def allocate_stakes(result: ArbitrageResult, total_stake: float) -> StakePlan:
     s = result.total_implied_probability
     legs = []
     for leg in result.legs:
-        stake = total_stake * (1.0 / leg.decimal_odds) / s
+        if result.stake_fractions is not None:
+            fraction = result.stake_fractions[leg.selection]
+        else:
+            fraction = (1.0 / leg.decimal_odds) / s
+        stake = total_stake * fraction
         payout = stake * leg.decimal_odds
         legs.append(
             StakeLeg(

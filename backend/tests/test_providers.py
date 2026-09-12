@@ -4,7 +4,7 @@ import pytest
 from app.core.enums import MarketType, Sport
 from app.engine.arbitrage import find_arbitrage
 from app.providers.base import parse_decimal_odds, parse_float
-from app.providers.oddsapi import parse_oddsapi_response
+from app.providers.oddsapi import OddsApiProvider, parse_oddsapi_response
 from app.providers.pinnacle import PinnacleProvider, parse_fixtures, parse_pinnacle_odds
 from tests.fixtures import demo_quotes
 
@@ -166,6 +166,114 @@ def test_oddsapi_parser_normalizes_h2h_totals_and_spreads():
     assert by_market[(MarketType.TOTALS, "over", 2.5)] == 1.95
     assert by_market[(MarketType.ASIAN_HANDICAP, "home", -0.5)] == 1.90
     assert by_market[(MarketType.ASIAN_HANDICAP, "away", -0.5)] == 1.95
+
+
+def test_oddsapi_parser_normalizes_btts_and_correct_score():
+    payload = [
+        {
+            "sport_title": "EPL",
+            "commence_time": "2026-02-01T15:00:00Z",
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "bookmakers": [
+                {
+                    "title": "SomeBook",
+                    "markets": [
+                        {
+                            "key": "btts",
+                            "outcomes": [
+                                {"name": "Yes", "price": 1.80},
+                                {"name": "No", "price": 2.00},
+                            ],
+                        },
+                        {
+                            "key": "correct_score",
+                            "outcomes": [
+                                {"name": "2:1", "price": 13.0},
+                                {"name": "1-0", "price": 7.0},
+                                {"name": "Any Other Home Win", "price": 5.0},  # no digits, must be skipped
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    quotes = parse_oddsapi_response(payload, Sport.SOCCER)
+    by_market = {(q.market, q.selection): q.decimal_odds for q in quotes}
+    assert by_market[(MarketType.BOTH_TEAMS_TO_SCORE, "yes")] == 1.80
+    assert by_market[(MarketType.BOTH_TEAMS_TO_SCORE, "no")] == 2.00
+    assert by_market[(MarketType.CORRECT_SCORE, "2-1")] == 13.0
+    assert by_market[(MarketType.CORRECT_SCORE, "1-0")] == 7.0
+    assert len(quotes) == 4  # the digit-less catch-all bucket was skipped
+
+
+def _oddsapi_transport(core_status: int = 200, exotic_status: int = 200, calls: list | None = None):
+    core_payload = [
+        {
+            "sport_title": "EPL",
+            "commence_time": "2026-02-01T15:00:00Z",
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "bookmakers": [
+                {"title": "SomeBook", "markets": [{"key": "h2h", "outcomes": [{"name": "Arsenal", "price": 2.10}, {"name": "Chelsea", "price": 3.50}]}]}
+            ],
+        }
+    ]
+    exotic_payload = [
+        {
+            "sport_title": "EPL",
+            "commence_time": "2026-02-01T15:00:00Z",
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "bookmakers": [
+                {"title": "SomeBook", "markets": [{"key": "btts", "outcomes": [{"name": "Yes", "price": 1.80}]}]}
+            ],
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        markets = request.url.params.get("markets")
+        if calls is not None:
+            calls.append(markets)
+        if markets == "h2h,spreads,totals":
+            if core_status != 200:
+                return httpx.Response(core_status, json={"message": "error"})
+            return httpx.Response(200, json=core_payload)
+        if markets == "btts,correct_score":
+            if exotic_status != 200:
+                return httpx.Response(exotic_status, json={"message": "error"})
+            return httpx.Response(200, json=exotic_payload)
+        return httpx.Response(404, json={})
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_oddsapi_provider_fetches_core_and_exotic_markets_separately():
+    calls: list[str] = []
+    provider = OddsApiProvider(
+        "https://api.the-odds-api.com", "key", ["soccer_epl"], transport=_oddsapi_transport(calls=calls)
+    )
+    quotes = await provider.fetch([Sport.SOCCER])
+    assert set(calls) == {"h2h,spreads,totals", "btts,correct_score"}
+    markets = {q.market for q in quotes}
+    assert MarketType.MONEYLINE_2WAY in markets
+    assert MarketType.BOTH_TEAMS_TO_SCORE in markets
+
+
+@pytest.mark.asyncio
+async def test_oddsapi_provider_exotic_markets_failure_never_costs_core_markets():
+    """A plan that doesn't include additional markets (btts/correct_score)
+    would 4xx on that request -- the core h2h/spreads/totals quotes the
+    arbitrage engine depends on must still come through.
+    """
+    provider = OddsApiProvider(
+        "https://api.the-odds-api.com", "key", ["soccer_epl"], transport=_oddsapi_transport(exotic_status=422)
+    )
+    quotes = await provider.fetch([Sport.SOCCER])
+    assert any(q.market == MarketType.MONEYLINE_2WAY for q in quotes)
+    assert not any(q.market == MarketType.BOTH_TEAMS_TO_SCORE for q in quotes)
 
 
 def test_parse_float_rejects_non_numeric_and_bool():
