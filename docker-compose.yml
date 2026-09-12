@@ -18,7 +18,7 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "7001:7001"
     environment:
       DATABASE_URL: postgresql+asyncpg://yb:yb@postgres:5432/yb
       PINNACLE_BASE_URL: https://api.pinnacle.com
@@ -42,10 +42,10 @@ services:
     build:
       context: ./frontend
       args:
-        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:7001
         NEXT_PUBLIC_API_KEY: ${API_KEYS:-dev-local-key}
     ports:
-      - "3000:3000"
+      - "7000:7000"
     depends_on:
       - backend
 

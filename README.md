@@ -259,10 +259,10 @@ arbitrage engine — keep that distinction when presenting results to users.
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env   # fill in ODDS_API_KEY and/or PINNACLE_USERNAME/PASSWORD
-.venv/bin/uvicorn app.main:app --reload
+.venv/bin/uvicorn app.main:app --reload --port 7001
 ```
 
-Visit `http://localhost:8000/opportunities` with header `x-api-key:
+Visit `http://localhost:7001/opportunities` with header `x-api-key:
 dev-local-key` (or `/health`, no auth). **With no provider configured yet,
 this correctly returns `[]`** — that's not broken, that's the app refusing
 to show fabricated picks. Fill in `ODDS_API_KEY` (recommended, see above)
@@ -284,7 +284,7 @@ cp .env.local.example .env.local
 npm run dev
 ```
 
-Visit `http://localhost:3000`.
+Visit `http://localhost:7000`.
 
 ### 상시 실행 (도커 없이, 계속 켜두기)
 
@@ -295,7 +295,7 @@ Visit `http://localhost:3000`.
 
 ```bash
 cd backend
-nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
+nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 7001 > backend.log 2>&1 &
 ```
 
 ```bash
@@ -334,7 +334,7 @@ pm2 start ecosystem.config.js
 ```
 
 저장소 루트의 `ecosystem.config.js`가 `yb-backend`(`python3 -m uvicorn ...`,
-`backend/.env`를 그대로 읽음)와 `yb-frontend`(`npm start`, 3000번 포트) 두
+`backend/.env`를 그대로 읽음, 7001번 포트)와 `yb-frontend`(`npm start`, 7000번 포트) 두
 프로세스를 정의합니다. 자주 쓰는 명령:
 
 ```bash
@@ -356,7 +356,7 @@ pm2 save && pm2 startup           # 서버 재부팅 후에도 자동으로 다�
 docker compose up --build
 ```
 
-Backend on `:8000`, frontend on `:3000`, Postgres on `:5432`. Set
+Backend on `:7001`, frontend on `:7000`, Postgres on `:5432`. Set
 `ODDS_API_KEY` and/or `PINNACLE_USERNAME`/`PINNACLE_PASSWORD` as
 environment variables (or a `.env` file docker-compose reads) once you
 have real accounts — with neither set, it comes up fine and shows an
