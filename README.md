@@ -306,6 +306,50 @@ nohup npm start > frontend.log 2>&1 &   # 먼저 npm run build 한 번 실행
 (`tmux`/`screen` 세션 안에서 그냥 `uvicorn ...`, `npm run dev`를 포그라운드로 띄워두는
 방법도 동일하게 잘 동작합니다. systemd 유닛으로 등록하면 재부팅 후에도 자동 재시작됩니다.)
 
+### 상시 실행 (PM2, 도커·가상환경 없이 한 번에)
+
+가상환경 없이 시스템 Python에 그대로 설치하고, 백엔드·프론트엔드를 PM2 하나로
+같이 띄우고 싶다면:
+
+```bash
+# 1) 백엔드 의존성 (venv 없이, 시스템/사용자 site-packages에 설치)
+cd backend
+pip3 install --user -r requirements.txt
+# Debian/Ubuntu류에서 "externally-managed-environment" 에러가 나면:
+#   pip3 install --user --break-system-packages -r requirements.txt
+cp .env.example .env   # DATABASE_URL을 sqlite+aiosqlite:///./yb.db 로 바꾸기
+
+# 2) 프론트엔드 빌드 (PM2는 `next start`만 실행하므로 build가 미리 되어 있어야 함)
+cd ../frontend
+npm install
+cp .env.local.example .env.local
+npm run build
+
+# 3) PM2 설치 (전역, 한 번만)
+npm install -g pm2
+
+# 4) 저장소 루트에서 백엔드+프론트엔드 한 번에 기동
+cd ..
+pm2 start ecosystem.config.js
+```
+
+저장소 루트의 `ecosystem.config.js`가 `yb-backend`(`python3 -m uvicorn ...`,
+`backend/.env`를 그대로 읽음)와 `yb-frontend`(`npm start`, 3000번 포트) 두
+프로세스를 정의합니다. 자주 쓰는 명령:
+
+```bash
+pm2 status              # 두 프로세스 상태 확인
+pm2 logs                # 로그 실시간으로 보기 (Ctrl+C로 종료해도 프로세스는 안 죽음)
+pm2 logs yb-backend      # 백엔드 로그만
+pm2 restart ecosystem.config.js   # .env 등 설정 바꾼 뒤 재시작
+pm2 stop ecosystem.config.js      # 둘 다 정지
+pm2 save && pm2 startup           # 서버 재부팅 후에도 자동으로 다시 뜨게 등록
+```
+
+`backend/.env`를 고친 뒤에는 (예: `ODDS_API_KEY` 나중에 채워 넣을 때) 반드시
+`pm2 restart yb-backend`로 재시작해야 반영됩니다 — pydantic-settings가 프로세스
+시작 시점에 `.env`를 한 번만 읽기 때문입니다.
+
 ### Docker Compose (선택사항)
 
 ```bash
