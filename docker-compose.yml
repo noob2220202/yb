@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: yb
+      POSTGRES_PASSWORD: yb
+      POSTGRES_DB: yb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://yb:yb@postgres:5432/yb
+      USE_DEMO_PROVIDER: "true"
+      PINNACLE_BASE_URL: https://api.pinnacle.com
+      PINNACLE_USERNAME: ${PINNACLE_USERNAME:-}
+      PINNACLE_PASSWORD: ${PINNACLE_PASSWORD:-}
+      ODDS_API_KEY: ${ODDS_API_KEY:-}
+      ODDS_API_BASE_URL: https://api.the-odds-api.com
+      ODDS_API_SPORT_KEYS: ${ODDS_API_SPORT_KEYS:-soccer_epl}
+      POLL_SPORTS: ${POLL_SPORTS:-soccer}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
+      API_KEYS: ${API_KEYS:-dev-local-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+        NEXT_PUBLIC_API_KEY: ${API_KEYS:-dev-local-key}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres-data:
