@@ -562,37 +562,6 @@ section > p.hint {
   font-variant-numeric: tabular-nums;
 }
 
-.calc-legs {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.calc-leg-row {
-  display: grid;
-  grid-template-columns: 64px 1fr 100px;
-  gap: var(--sp-2);
-  align-items: center;
-}
-
-.calc-leg-label {
-  font-size: 12.5px;
-  font-weight: 700;
-  text-transform: capitalize;
-  color: var(--text-1);
-}
-
-.calc-leg-row input {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--text-1);
-  border-radius: var(--r-sm);
-  padding: 7px 10px;
-  font-size: 13px;
-  width: 100%;
-  font-variant-numeric: tabular-nums;
-}
-
 .calc-error {
   background: var(--danger-bg);
   color: #f7a39d;
@@ -603,18 +572,97 @@ section > p.hint {
   line-height: 1.5;
 }
 
-.calc-result {
-  border-top: 1px dashed var(--border);
-  padding-top: var(--sp-4);
+/* 여러 마켓을 한 번에 입력하는 행 기반 표 (수동 계산기) */
+.scan-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
 }
 
-.profit-line.calc-loss strong {
-  color: var(--danger);
+.scan-row {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1fr 1fr 100px 32px;
+  gap: var(--sp-2);
+  align-items: center;
 }
 
-@media (max-width: 480px) {
-  .calc-leg-row {
-    grid-template-columns: 56px 1fr 84px;
+.scan-row select,
+.scan-row input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font-size: 12.5px;
+  width: 100%;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.scan-row-remove {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  border-radius: var(--r-sm);
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.scan-row-remove:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.scan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-3);
+}
+
+.scan-actions .calc-field {
+  flex: 0 1 160px;
+}
+
+.scan-results {
+  margin-top: var(--sp-4);
+}
+
+.scan-warning {
+  margin: 0 0 var(--sp-3) !important;
+}
+
+.scan-profit {
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.scan-profit strong {
+  color: var(--profit);
+  font-variant-numeric: tabular-nums;
+}
+
+.pick-box.loss-tone {
+  --tone: var(--danger);
+  --tone-bg: var(--danger-bg);
+}
+
+.badge.verified {
+  background: rgba(110, 168, 255, 0.14);
+  color: var(--info);
+}
+
+@media (max-width: 640px) {
+  .scan-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .scan-row-remove {
+    justify-self: end;
   }
 }
 

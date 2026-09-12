@@ -1,4 +1,5 @@
 import json
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.auth import require_api_key
 from app.api.schemas import (
     LegOut,
-    ManualCalculationIn,
-    ManualCalculationOut,
     OpportunityOut,
+    ScanGroupResult,
+    ScanRequest,
     StakeLegOut,
     StakePlanOut,
     ValueEdgeOut,
@@ -38,6 +39,25 @@ router = APIRouter()
 _CALCULATOR_EVENT = NormalizedEvent(
     sport=Sport.SOCCER, home_team="A", away_team="B", commence_time=datetime(2000, 1, 1, tzinfo=timezone.utc)
 )
+
+_MARKET_LABELS: dict[MarketType, str] = {
+    MarketType.MONEYLINE_3WAY: "승무패",
+    MarketType.MONEYLINE_2WAY: "승패",
+    MarketType.EUROPEAN_HANDICAP: "유럽식 핸디캡",
+    MarketType.TOTALS: "오버언더",
+    MarketType.ASIAN_HANDICAP: "아시안 핸디캡",
+    MarketType.BOTH_TEAMS_TO_SCORE: "양팀득점",
+    MarketType.CORRECT_SCORE: "정확한 스코어",
+    MarketType.WINNING_MARGIN: "몇점차승리",
+}
+
+
+def _market_label(market_str: str, line: float | None) -> str:
+    try:
+        label = _MARKET_LABELS.get(MarketType(market_str), market_str)
+    except ValueError:
+        label = market_str
+    return f"{label} ({line})" if line is not None else label
 
 
 @router.get("/health")
@@ -129,70 +149,145 @@ async def stake_plan(
 
 
 @router.post(
-    "/calculator/arbitrage",
-    response_model=ManualCalculationOut,
+    "/calculator/scan",
+    response_model=list[ScanGroupResult],
     dependencies=[Depends(require_api_key)],
 )
-async def calculate_manual_arbitrage(payload: ManualCalculationIn) -> ManualCalculationOut:
-    """Manual what-if calculator — no scanner/DB involved. Lets a user type
-    in odds they found by hand (any bookmakers, any market this engine
-    supports) and see whether it's a genuine arbitrage plus exactly how
-    much to stake on each side. Unlike ``/opportunities/{id}/stake-plan``,
-    a non-arbitrage combination is NOT an error here: it's still valid,
-    useful information ("this guarantees a loss of X%, don't bet it"),
-    so ``allow_negative=True`` is used throughout.
+async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
+    """Manual what-if calculator — no scanner/DB involved. Takes a whole
+    POOL of odds across as many markets as you want, all for ONE match
+    (moneyline, European 3-way handicap, Asian handicap incl. quarter
+    lines, totals, BTTS, correct score, or any custom label you type),
+    groups them by (market, line), and reports every group's margin so
+    you can see which combination(s) among everything you entered
+    actually clears 100% (``is_arbitrage``).
+
+    Two tiers, always reported separately, never conflated:
+
+    - ``verified=True``: a recognized clean-partition market with EXACTLY
+      its required selections present. Priced by the same engine used for
+      real detected opportunities — a genuine, checked guarantee when
+      ``is_arbitrage`` is true.
+    - ``verified=False``: everything else (correct_score, a custom label,
+      or a known market missing/duplicating a required selection). Still
+      sums 1/odds and reports a margin, but this is only a TRUE guarantee
+      if your own entries already cover every possible outcome of that
+      market — something this tool cannot check for an open-ended market
+      like correct score. Always carries an explanatory ``warning``.
     """
-    try:
-        market = MarketType(payload.market)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"알 수 없는 마켓입니다: {payload.market}") from exc
+    groups: dict[tuple[str, float | None], list] = defaultdict(list)
+    for leg in payload.legs:
+        groups[(leg.market, leg.line)].append(leg)
 
-    required = expected_selections(market)
-    if not required:
-        raise HTTPException(status_code=400, detail="이 마켓은 수동 계산기에서 지원하지 않습니다")
+    results: list[ScanGroupResult] = []
+    for (market_str, line), group_legs in groups.items():
+        market: MarketType | None
+        try:
+            market = MarketType(market_str)
+        except ValueError:
+            market = None
 
-    if not is_supported_line(market, payload.line):
-        raise HTTPException(status_code=400, detail="이 마켓에는 라인이 필요하거나, 지원하지 않는 라인입니다")
-
-    got_selections = [leg.selection for leg in payload.legs]
-    if set(got_selections) != set(required) or len(got_selections) != len(required):
-        raise HTTPException(
-            status_code=400,
-            detail=f"이 마켓에는 다음 선택지가 정확히 하나씩 필요합니다: {sorted(required)}",
+        required = expected_selections(market) if market is not None else frozenset()
+        got_selections = [leg.selection for leg in group_legs]
+        is_verifiable = (
+            market is not None
+            and bool(required)
+            and set(got_selections) == set(required)
+            and len(got_selections) == len(required)
+            and is_supported_line(market, line)
         )
 
-    quotes = [
-        OddsQuote(
-            event=_CALCULATOR_EVENT,
-            bookmaker=leg.bookmaker or f"북메이커{i + 1}",
-            market=market,
-            selection=leg.selection,
-            decimal_odds=leg.decimal_odds,
-            line=payload.line,
+        if is_verifiable:
+            quotes = [
+                OddsQuote(
+                    event=_CALCULATOR_EVENT,
+                    bookmaker=leg.bookmaker or f"북메이커{i + 1}",
+                    market=market,
+                    selection=leg.selection,
+                    decimal_odds=leg.decimal_odds,
+                    line=line,
+                )
+                for i, leg in enumerate(group_legs)
+            ]
+            result = find_arbitrage(quotes)
+            if result is not None:
+                plan = allocate_stakes(result, payload.total_stake, allow_negative=True)
+                results.append(
+                    ScanGroupResult(
+                        market=market_str,
+                        market_label=_market_label(market_str, line),
+                        line=line,
+                        verified=True,
+                        is_arbitrage=result.is_arbitrage,
+                        total_implied_probability=result.total_implied_probability,
+                        margin_percent=result.margin_percent,
+                        push_possible=result.push_possible,
+                        quarter_line=is_quarter_line(market, line),
+                        guaranteed_profit=plan.guaranteed_profit,
+                        profit_percent=plan.profit_percent,
+                        legs=[StakeLegOut(**leg.__dict__) for leg in plan.legs],
+                        warning=None,
+                    )
+                )
+                continue
+
+        # Unverified fallback: a custom/open-ended market, or a known
+        # market missing/duplicating a required selection. Still useful,
+        # never hidden -- just never claimed as a proven guarantee.
+        if len(group_legs) < 2:
+            continue  # nothing to arbitrage with a single price
+
+        total_implied = sum(1.0 / leg.decimal_odds for leg in group_legs)
+        margin_percent = (1.0 / total_implied - 1.0) * 100.0
+        legs_out = []
+        for i, leg in enumerate(group_legs):
+            fraction = (1.0 / leg.decimal_odds) / total_implied
+            stake = payload.total_stake * fraction
+            legs_out.append(
+                StakeLegOut(
+                    selection=leg.selection,
+                    bookmaker=leg.bookmaker or f"북메이커{i + 1}",
+                    decimal_odds=leg.decimal_odds,
+                    stake=round(stake, 2),
+                    payout=round(stake * leg.decimal_odds, 2),
+                )
+            )
+        guaranteed_profit = payload.total_stake * (1.0 / total_implied - 1.0)
+
+        if market is not None and required:
+            warning = (
+                f"이 마켓에는 다음 선택지가 정확히 하나씩 필요합니다: {sorted(required)} "
+                f"(지금 입력: {sorted(set(got_selections))}) — 부족하거나 중복된 채로는 "
+                "검증할 수 없어 단순 배당 합산만 보여드립니다."
+            )
+        else:
+            warning = (
+                "이 마켓은 엔진이 검증하지 않습니다 — 입력한 선택지가 실제로 일어날 수 있는 "
+                "모든 경우의 수를 빠짐없이 포함해야만 진짜 확정 수익입니다. 정확한 스코어처럼 "
+                "경우의 수가 사실상 무한한 마켓은 '기타 전체' 같은 캐치올 선택지 없이는 "
+                "확정 수익이 될 수 없습니다."
+            )
+
+        results.append(
+            ScanGroupResult(
+                market=market_str,
+                market_label=_market_label(market_str, line),
+                line=line,
+                verified=False,
+                is_arbitrage=total_implied < 1.0,
+                total_implied_probability=total_implied,
+                margin_percent=margin_percent,
+                push_possible=False,
+                quarter_line=False,
+                guaranteed_profit=round(guaranteed_profit, 2),
+                profit_percent=margin_percent,
+                legs=legs_out,
+                warning=warning,
+            )
         )
-        for i, leg in enumerate(payload.legs)
-    ]
 
-    result = find_arbitrage(quotes)
-    if result is None:
-        # Only reachable if find_arbitrage's own (redundant) validation
-        # disagrees with the checks above -- surface as a clear 400
-        # rather than a 500.
-        raise HTTPException(status_code=400, detail="계산할 수 없는 조합입니다")
-
-    plan = allocate_stakes(result, payload.total_stake, allow_negative=True)
-
-    return ManualCalculationOut(
-        is_arbitrage=result.is_arbitrage,
-        total_implied_probability=result.total_implied_probability,
-        margin_percent=result.margin_percent,
-        push_possible=result.push_possible,
-        quarter_line=is_quarter_line(market, payload.line),
-        total_stake=plan.total_stake,
-        guaranteed_profit=plan.guaranteed_profit,
-        profit_percent=plan.profit_percent,
-        legs=[StakeLegOut(**leg.__dict__) for leg in plan.legs],
-    )
+    results.sort(key=lambda r: (not r.verified, not r.is_arbitrage, -r.margin_percent))
+    return results
 
 
 @router.get("/value-edges", response_model=list[ValueEdgeOut], dependencies=[Depends(require_api_key)])

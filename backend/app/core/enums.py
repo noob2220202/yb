@@ -25,6 +25,7 @@ class MarketType(str, Enum):
 
     MONEYLINE_3WAY = "moneyline_3way"  # home / draw / away
     MONEYLINE_2WAY = "moneyline_2way"  # home / away (no draw)
+    EUROPEAN_HANDICAP = "european_handicap"  # home / draw / away AFTER a handicap -- draw stays a real outcome (unlike Asian handicap)
     TOTALS = "totals"  # over/under a line
     ASIAN_HANDICAP = "asian_handicap"
     BOTH_TEAMS_TO_SCORE = "btts"
@@ -41,6 +42,7 @@ class MarketType(str, Enum):
 CLEAN_PARTITION_MARKETS = {
     MarketType.MONEYLINE_3WAY,
     MarketType.MONEYLINE_2WAY,
+    MarketType.EUROPEAN_HANDICAP,
     MarketType.BOTH_TEAMS_TO_SCORE,
 }
 

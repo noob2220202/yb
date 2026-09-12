@@ -224,13 +224,27 @@ docker-compose.yml    postgres + backend + frontend (선택사항 — 로컬은 
 확정픽이 새로 뜰 때마다 OS 알림 + 소리(사인파 차임, 별도 음원 파일 불필요)로 알려줍니다.
 임계값은 브라우저 `localStorage`에 저장됩니다.
 
-맨 아래 **"수동 계산기"** 섹션은 스캐너/DB와 완전히 별개로 동작합니다 — 직접 여러
-북메이커 사이트를 보고 찾은 배당을 마켓별로 입력하면(승무패/승패/오버언더/아시안
-핸디캡(쿼터 라인 포함)/BTTS), 백엔드의 `POST /calculator/arbitrage`가 실제 아비트리지
-엔진(`app/engine/arbitrage.py`)을 그대로 재사용해서 확정 수익 여부와 각 선택지에
-정확히 얼마씩 걸어야 하는지 계산해 돌려줍니다. 확정 수익이 아닌 조합을 넣어도 에러가
-아니라 "이 배당대로 걸면 얼마 손실"이라고 그대로 보여줍니다 — 틀린 조합을 걸지
-않도록 막아주는 것도 이 계산기의 목적입니다.
+맨 아래 **"수동 계산기"** 섹션은 스캐너/DB와 완전히 별개로 동작합니다 — 마켓 구분 없이
+한 경기에 대해 찾은 배당을 전부 한 표에 쏟아부으면 됩니다 (승무패, 유럽식 핸디캡
+(3-way), 아시안 핸디캡(쿼터 라인 포함), 오버언더, 양팀득점, 정확한 스코어, 기타
+커스텀까지 행을 자유롭게 추가). 백엔드의 `POST /calculator/scan`이 입력을
+(마켓, 라인)별로 묶어서 **그중 실제로 100% 마진이 나는 조합만 골라** 보여줍니다:
+
+- **엔진 검증(`verified: true`)**: 승무패·유럽식 핸디캡·아시안 핸디캡(쿼터 라인
+  포함)·오버언더·BTTS처럼 이 프로젝트가 완전한 결과 분할(clean partition)임을
+  아는 마켓에서, 필요한 선택지가 정확히 다 채워졌을 때만. 실제 감지된
+  확정픽과 똑같은 `app/engine/arbitrage.py` 엔진으로 계산되므로 `is_arbitrage`가
+  참이면 진짜 수학적 보장입니다.
+- **검증 안 됨(`verified: false`)**: 정확한 스코어나 자유 입력 커스텀 마켓, 혹은
+  선택지가 빠지거나 중복된 경우. 배당 합산(1/배당의 합)은 똑같이 계산해서
+  보여주지만, **입력한 선택지가 실제로 일어날 수 있는 모든 경우의 수를 빠짐없이
+  덮었을 때만** 진짜 확정 수익입니다 (정확한 스코어처럼 경우의 수가 사실상
+  무한한 마켓은 "기타 전체" 캐치올 없이는 절대 확정 수익이 될 수 없음) — 이걸
+  매 결과마다 경고 문구로 명시합니다.
+
+확정 수익이 아닌 조합도 숨기지 않고 그대로 보여줍니다 (마진이 몇 %인지, 왜 검증이
+안 되는지까지) — 조용히 걸러버리는 것보다 투명하게 보여주는 쪽을 택했습니다. 한
+번에 한 경기 분량만 입력해야 합니다 (여러 경기를 섞으면 같은 마켓끼리 잘못 묶임).
 
 ### Why the math is split into two engines
 
@@ -450,11 +464,13 @@ Pinnacle @ 4.72  (모델 엣지 +35.0%)
 
 ## Current scope / what's next
 
-Shipped: core-market arbitrage (1X2, 2-way moneyline, totals, Asian
-handicap incl. quarter lines, BTTS), push-aware math, stake calculator
-(both auto, from scanner-detected opportunities, and manual — type in any
-odds you found yourself via `POST /calculator/arbitrage` / the "수동
-계산기" dashboard section), value-edge model (exotic markets + same-book
+Shipped: core-market arbitrage (1X2, 2-way moneyline, European 3-way
+handicap, totals, Asian handicap incl. quarter lines, BTTS), push-aware
+math, stake calculator (both auto, from scanner-detected opportunities,
+and manual — throw in odds across as many markets as you want for one
+match via `POST /calculator/scan` / the "수동 계산기" dashboard section,
+and it picks out which combination(s) actually clear 100% margin),
+value-edge model (exotic markets + same-book
 cross-line consistency — works with just Pinnacle), API-key auth, live
 pick-box dashboard,
 신규 확정픽 브라우저 알림(+소리), 확정픽/가치엣지 각각 별도 채널의

@@ -35,29 +35,33 @@ export interface StakePlan {
   legs: StakeLeg[];
 }
 
-export interface ManualLegInput {
+export interface ScanLegInput {
+  market: string;
+  line: number | null;
   selection: string;
   bookmaker: string;
   decimal_odds: number;
 }
 
-export interface ManualCalculationRequest {
-  market: string;
-  line: number | null;
+export interface ScanRequest {
   total_stake: number;
-  legs: ManualLegInput[];
+  legs: ScanLegInput[];
 }
 
-export interface ManualCalculation {
+export interface ScanGroupResult {
+  market: string;
+  market_label: string;
+  line: number | null;
+  verified: boolean;
   is_arbitrage: boolean;
   total_implied_probability: number;
   margin_percent: number;
   push_possible: boolean;
   quarter_line: boolean;
-  total_stake: number;
   guaranteed_profit: number;
   profit_percent: number;
   legs: StakeLeg[];
+  warning: string | null;
 }
 
 export interface ValueEdge {
@@ -99,8 +103,8 @@ export function fetchStakePlan(opportunityId: number, totalStake: number): Promi
   return apiFetch<StakePlan>(`/opportunities/${opportunityId}/stake-plan?total_stake=${totalStake}`);
 }
 
-export async function calculateManualArbitrage(req: ManualCalculationRequest): Promise<ManualCalculation> {
-  const res = await fetch(`${API_BASE_URL}/calculator/arbitrage`, {
+export async function scanManualOdds(req: ScanRequest): Promise<ScanGroupResult[]> {
+  const res = await fetch(`${API_BASE_URL}/calculator/scan`, {
     method: "POST",
     headers: { "x-api-key": API_KEY, "content-type": "application/json" },
     cache: "no-store",
@@ -116,5 +120,5 @@ export async function calculateManualArbitrage(req: ManualCalculationRequest): P
     }
     throw new Error(detail);
   }
-  return res.json() as Promise<ManualCalculation>;
+  return res.json() as Promise<ScanGroupResult[]>;
 }

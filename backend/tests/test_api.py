@@ -119,128 +119,145 @@ def test_admin_poll_triggers_another_cycle(api_client):
 
 
 # ---------------------------------------------------------------------
-# /calculator/arbitrage: manual odds entry, no DB/scanner involved.
+# /calculator/scan: manual pool of odds across many markets at once,
+# no DB/scanner involved.
 # ---------------------------------------------------------------------
 
 
-def test_calculator_requires_api_key(api_client):
+def test_scan_requires_api_key(api_client):
     resp = api_client.post(
-        "/calculator/arbitrage",
+        "/calculator/scan",
         json={
-            "market": "moneyline_2way",
             "total_stake": 1000,
             "legs": [
-                {"selection": "home", "bookmaker": "A", "decimal_odds": 2.10},
-                {"selection": "away", "bookmaker": "B", "decimal_odds": 2.10},
+                {"market": "moneyline_2way", "selection": "home", "bookmaker": "A", "decimal_odds": 2.10},
+                {"market": "moneyline_2way", "selection": "away", "bookmaker": "B", "decimal_odds": 2.10},
             ],
         },
     )
     assert resp.status_code in (401, 422)
 
 
-def test_calculator_finds_genuine_two_way_arbitrage(api_client):
+def test_scan_finds_verified_arbitrage_among_a_mixed_pool(api_client):
+    """The core ask: throw in odds across several markets at once, only
+    ONE of which is actually a genuine arbitrage, and get it picked out."""
     resp = api_client.post(
-        "/calculator/arbitrage",
+        "/calculator/scan",
         headers={"x-api-key": "test-key"},
         json={
-            "market": "moneyline_2way",
             "total_stake": 100000,
             "legs": [
-                {"selection": "home", "bookmaker": "북메이커A", "decimal_odds": 2.10},
-                {"selection": "away", "bookmaker": "북메이커B", "decimal_odds": 2.10},
+                # Genuine 2-way arbitrage.
+                {"market": "moneyline_2way", "selection": "home", "bookmaker": "북메이커A", "decimal_odds": 2.10},
+                {"market": "moneyline_2way", "selection": "away", "bookmaker": "북메이커B", "decimal_odds": 2.10},
+                # Ordinary vig'd totals -- not an arbitrage.
+                {"market": "totals", "line": 2.5, "selection": "over", "bookmaker": "C", "decimal_odds": 1.85},
+                {"market": "totals", "line": 2.5, "selection": "under", "bookmaker": "C", "decimal_odds": 1.85},
+                # BTTS with only one side entered -- incomplete, unverifiable.
+                {"market": "btts", "selection": "yes", "bookmaker": "D", "decimal_odds": 1.90},
             ],
         },
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["is_arbitrage"] is True
-    assert body["guaranteed_profit"] > 0
-    assert sum(leg["stake"] for leg in body["legs"]) == pytest.approx(100000, abs=1)
-    # Both sides pay out (approximately) the same amount regardless of outcome.
-    payouts = [leg["payout"] for leg in body["legs"]]
-    assert max(payouts) - min(payouts) < 1.0
+
+    ml = next(g for g in body if g["market"] == "moneyline_2way")
+    assert ml["verified"] is True
+    assert ml["is_arbitrage"] is True
+    assert ml["guaranteed_profit"] > 0
+    assert ml["warning"] is None
+
+    totals = next(g for g in body if g["market"] == "totals")
+    assert totals["verified"] is True
+    assert totals["is_arbitrage"] is False
+
+    # BTTS never appears as a group at all -- a single leg can't be scanned.
+    assert not any(g["market"] == "btts" for g in body)
+
+    # The genuine arbitrage sorts first.
+    assert body[0]["market"] == "moneyline_2way"
 
 
-def test_calculator_reports_negative_margin_instead_of_erroring(api_client):
+def test_scan_handles_quarter_line_asian_handicap(api_client):
     resp = api_client.post(
-        "/calculator/arbitrage",
+        "/calculator/scan",
         headers={"x-api-key": "test-key"},
         json={
-            "market": "moneyline_2way",
-            "total_stake": 1000,
-            "legs": [
-                {"selection": "home", "bookmaker": "A", "decimal_odds": 1.80},
-                {"selection": "away", "bookmaker": "B", "decimal_odds": 1.80},
-            ],
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["is_arbitrage"] is False
-    assert body["guaranteed_profit"] < 0
-
-
-def test_calculator_handles_quarter_line_asian_handicap(api_client):
-    resp = api_client.post(
-        "/calculator/arbitrage",
-        headers={"x-api-key": "test-key"},
-        json={
-            "market": "asian_handicap",
-            "line": -0.25,
             "total_stake": 100000,
             "legs": [
-                {"selection": "home", "bookmaker": "A", "decimal_odds": 2.20},
-                {"selection": "away", "bookmaker": "B", "decimal_odds": 2.20},
+                {"market": "asian_handicap", "line": -0.25, "selection": "home", "bookmaker": "A", "decimal_odds": 2.20},
+                {"market": "asian_handicap", "line": -0.25, "selection": "away", "bookmaker": "B", "decimal_odds": 2.20},
             ],
         },
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["quarter_line"] is True
-    assert body["push_possible"] is False
-    assert body["is_arbitrage"] is True
+    assert len(body) == 1
+    assert body[0]["quarter_line"] is True
+    assert body[0]["push_possible"] is False
+    assert body[0]["is_arbitrage"] is True
+    assert body[0]["verified"] is True
 
 
-def test_calculator_rejects_missing_line_for_totals(api_client):
+def test_scan_verifies_european_handicap_as_a_3way_clean_partition(api_client):
     resp = api_client.post(
-        "/calculator/arbitrage",
+        "/calculator/scan",
         headers={"x-api-key": "test-key"},
         json={
-            "market": "totals",
-            "total_stake": 1000,
+            "total_stake": 100000,
             "legs": [
-                {"selection": "over", "bookmaker": "A", "decimal_odds": 2.10},
-                {"selection": "under", "bookmaker": "B", "decimal_odds": 2.10},
+                {"market": "european_handicap", "line": -1, "selection": "home", "bookmaker": "A", "decimal_odds": 3.30},
+                {"market": "european_handicap", "line": -1, "selection": "draw", "bookmaker": "B", "decimal_odds": 3.60},
+                {"market": "european_handicap", "line": -1, "selection": "away", "bookmaker": "C", "decimal_odds": 3.30},
             ],
         },
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["verified"] is True
+    assert body[0]["is_arbitrage"] is True
+    assert len(body[0]["legs"]) == 3
 
 
-def test_calculator_rejects_missing_selection(api_client):
+def test_scan_marks_missing_selection_as_unverified_with_a_warning(api_client):
     resp = api_client.post(
-        "/calculator/arbitrage",
+        "/calculator/scan",
         headers={"x-api-key": "test-key"},
         json={
-            "market": "moneyline_3way",
             "total_stake": 1000,
             "legs": [
-                {"selection": "home", "bookmaker": "A", "decimal_odds": 2.10},
-                {"selection": "away", "bookmaker": "B", "decimal_odds": 2.10},
+                {"market": "moneyline_3way", "selection": "home", "bookmaker": "A", "decimal_odds": 10.0},
+                {"market": "moneyline_3way", "selection": "away", "bookmaker": "B", "decimal_odds": 10.0},
             ],
         },
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["verified"] is False
+    assert "선택지" in body[0]["warning"]
+    # Still shows the raw numbers even though it can't be verified.
+    assert body[0]["total_implied_probability"] == pytest.approx(0.2)
 
 
-def test_calculator_rejects_unknown_market(api_client):
+def test_scan_marks_correct_score_and_custom_markets_as_unverified(api_client):
     resp = api_client.post(
-        "/calculator/arbitrage",
+        "/calculator/scan",
         headers={"x-api-key": "test-key"},
         json={
-            "market": "not_a_real_market",
             "total_stake": 1000,
-            "legs": [{"selection": "home", "bookmaker": "A", "decimal_odds": 2.10}],
+            "legs": [
+                {"market": "correct_score", "selection": "2-1", "bookmaker": "A", "decimal_odds": 8.0},
+                {"market": "correct_score", "selection": "1-0", "bookmaker": "A", "decimal_odds": 7.0},
+                {"market": "코너킥 오버 9.5", "selection": "over", "bookmaker": "B", "decimal_odds": 1.85},
+                {"market": "코너킥 오버 9.5", "selection": "under", "bookmaker": "B", "decimal_odds": 1.85},
+            ],
         },
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    body = resp.json()
+    labels = {g["market"] for g in body}
+    assert labels == {"correct_score", "코너킥 오버 9.5"}
+    assert all(g["verified"] is False for g in body)
+    assert all("경우의 수" in g["warning"] for g in body)

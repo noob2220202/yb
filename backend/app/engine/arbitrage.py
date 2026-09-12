@@ -59,6 +59,7 @@ from app.core.schemas import OddsQuote
 _EXPECTED_SELECTIONS: dict[MarketType, frozenset[str]] = {
     MarketType.MONEYLINE_3WAY: frozenset({"home", "draw", "away"}),
     MarketType.MONEYLINE_2WAY: frozenset({"home", "away"}),
+    MarketType.EUROPEAN_HANDICAP: frozenset({"home", "draw", "away"}),
     MarketType.BOTH_TEAMS_TO_SCORE: frozenset({"yes", "no"}),
     MarketType.TOTALS: frozenset({"over", "under"}),
     MarketType.ASIAN_HANDICAP: frozenset({"home", "away"}),
