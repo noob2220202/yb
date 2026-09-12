@@ -5,9 +5,12 @@ from app.engine.scoreline_model import (
     correct_score_probability,
     devig_three_way,
     devig_two_way,
+    find_cross_line_edges,
     find_value_edges,
+    handicap_probabilities,
     implied_1x2,
     score_matrix,
+    totals_probabilities,
     winning_margin_buckets,
 )
 
@@ -81,3 +84,73 @@ def test_find_value_edges_flags_generous_price_and_skips_fair_one():
     assert len(edges) == 1
     assert edges[0].bookmaker == "SoftBook"
     assert edges[0].edge_percent > 2.0
+
+
+def test_totals_probabilities_sum_to_one_and_classify_push_correctly():
+    matrix = score_matrix(1.5, 1.1)
+
+    p_over, p_under, p_push = totals_probabilities(matrix, 2.5)
+    assert p_over + p_under + p_push == pytest.approx(1.0)
+    assert p_push == 0.0  # half line can never push
+
+    p_over, p_under, p_push = totals_probabilities(matrix, 2.0)
+    assert p_over + p_under + p_push == pytest.approx(1.0)
+    assert p_push > 0.0  # whole-number line can push
+
+
+def test_handicap_probabilities_sum_to_one_and_symmetric_at_zero():
+    matrix = score_matrix(1.3, 1.3)  # equal strength
+
+    p_home, p_away, p_push = handicap_probabilities(matrix, 0.0)
+    assert p_home + p_away + p_push == pytest.approx(1.0)
+    assert p_home == pytest.approx(p_away, abs=1e-9)
+
+    p_home, p_away, p_push = handicap_probabilities(matrix, -0.5)
+    assert p_push == 0.0
+    assert p_home + p_away == pytest.approx(1.0)
+
+
+def test_find_cross_line_edges_flags_mispriced_secondary_line_only():
+    matrix = score_matrix(1.6, 1.0)
+
+    # 캘리브레이션에 쓰인 라인(2.5)은 정의상 모델과 거의 일치하므로 제외돼야 함.
+    p_over_25, p_under_25, _ = totals_probabilities(matrix, 2.5)
+    fair_over_25 = 1.0 / (p_over_25 / (p_over_25 + p_under_25))
+
+    # 다른 라인(1.5)은 일부러 모델 대비 후하게 가격을 매겨서 엣지가 나오도록 함.
+    p_over_15, p_under_15, _ = totals_probabilities(matrix, 1.5)
+    fair_over_15 = 1.0 / (p_over_15 / (p_over_15 + p_under_15))
+    generous_over_15 = fair_over_15 * 1.4
+
+    edges = find_cross_line_edges(
+        matrix,
+        totals_quotes=[
+            ("Pinnacle", 2.5, "over", round(fair_over_25, 2)),
+            ("Pinnacle", 1.5, "over", round(generous_over_15, 2)),
+        ],
+        handicap_quotes=[],
+        calibration_totals_line=2.5,
+        min_edge_percent=2.0,
+    )
+
+    assert len(edges) == 1
+    assert edges[0].line == 1.5
+    assert edges[0].market == "totals"
+    assert edges[0].edge_percent > 2.0
+
+
+def test_find_cross_line_edges_handles_handicap_quotes():
+    matrix = score_matrix(1.6, 1.0)
+    p_home, p_away, _ = handicap_probabilities(matrix, -1.5)
+    fair_home = 1.0 / (p_home / (p_home + p_away))
+    generous_home = fair_home * 1.3
+
+    edges = find_cross_line_edges(
+        matrix,
+        totals_quotes=[],
+        handicap_quotes=[("Pinnacle", -1.5, "home", round(generous_home, 2))],
+        min_edge_percent=2.0,
+    )
+    assert len(edges) == 1
+    assert edges[0].market == "asian_handicap"
+    assert edges[0].selection == "home"

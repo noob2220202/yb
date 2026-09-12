@@ -19,6 +19,24 @@ rates (lambda_home, lambda_away) are calibrated by least-squares fit
 against the match's own devigged 1X2 and Totals prices, so the model is
 always anchored to the market's own view of team strength rather than any
 external rating system.
+
+Two ways this gets used:
+
+1. ``find_value_edges`` — needs a *second* market type (correct score /
+   winning margin quotes) from some book. Useful when any provider
+   supplies those markets.
+2. ``find_cross_line_edges`` — calibrates from one book's primary
+   Totals/1X2 line, then checks whether ANY book's price for a different
+   Totals/Asian-Handicap line on the same match agrees with what that
+   calibrated model implies. It doesn't require a second bookmaker to
+   exist (if only Pinnacle is configured, every quote it compares is
+   necessarily Pinnacle's own — exactly the "does this book price its own
+   several lines consistently with itself" check), but it isn't confused
+   by a second one either. A real bookmaker's own lines are usually
+   priced consistently with each other (Pinnacle especially so — it's
+   known industry-wide for tight, internally consistent pricing), so
+   genuine same-book hits here should be rare and small. That's expected,
+   not a bug.
 """
 
 from __future__ import annotations
@@ -93,6 +111,42 @@ def implied_over(matrix: np.ndarray, line: float) -> float:
             if h + a > line:
                 total += matrix[h, a]
     return total
+
+
+def totals_probabilities(matrix: np.ndarray, line: float) -> tuple[float, float, float]:
+    """Returns (p_over, p_under, p_push) for a total-goals line — a push
+    is possible only when ``line`` is a whole number."""
+    size = matrix.shape[0]
+    p_over = p_under = p_push = 0.0
+    for h in range(size):
+        for a in range(size):
+            p = matrix[h, a]
+            total = h + a
+            if total > line:
+                p_over += p
+            elif total < line:
+                p_under += p
+            else:
+                p_push += p
+    return p_over, p_under, p_push
+
+
+def handicap_probabilities(matrix: np.ndarray, home_line: float) -> tuple[float, float, float]:
+    """Returns (p_home_covers, p_away_covers, p_push) for a home-team
+    Asian handicap line (e.g. -1.5 means the home side must win by 2+)."""
+    size = matrix.shape[0]
+    p_home = p_away = p_push = 0.0
+    for h in range(size):
+        for a in range(size):
+            p = matrix[h, a]
+            margin = (h - a) + home_line
+            if margin > 0:
+                p_home += p
+            elif margin < 0:
+                p_away += p
+            else:
+                p_push += p
+    return p_home, p_away, p_push
 
 
 @dataclass(frozen=True)
@@ -224,6 +278,98 @@ def _build_edge(bookmaker: str, selection: str, odds: float, model_p: float) -> 
     implied = 1.0 / odds
     edge = model_p * odds - 1.0
     return ValueEdge(
+        selection=selection,
+        bookmaker=bookmaker,
+        decimal_odds=odds,
+        model_probability=model_p,
+        implied_probability=implied,
+        edge_percent=edge * 100.0,
+    )
+
+
+@dataclass(frozen=True)
+class CrossLineEdge:
+    """A cross-line mismatch: some book's price for a secondary
+    Totals/Asian-Handicap line disagrees with what a primary-line-
+    calibrated model implies. Still not guaranteed profit (see module
+    docstring) — but unlike ``find_value_edges``, this needs no second
+    market type (correct score / winning margin), and no second
+    bookmaker either: with only one provider configured, every quote
+    compared is necessarily that same book's own, so this becomes a
+    same-book internal-consistency check for free. Only a book that
+    quotes more than one line per match is needed, which Pinnacle
+    always does.
+    """
+
+    market: str
+    line: float
+    selection: str
+    bookmaker: str
+    decimal_odds: float
+    model_probability: float
+    implied_probability: float
+    edge_percent: float
+
+
+def find_cross_line_edges(
+    matrix: np.ndarray,
+    totals_quotes: list[tuple[str, float, str, float]],
+    handicap_quotes: list[tuple[str, float, str, float]],
+    calibration_totals_line: float | None = None,
+    min_edge_percent: float = 2.0,
+) -> list[CrossLineEdge]:
+    """``totals_quotes`` / ``handicap_quotes`` are
+    (bookmaker, line, selection, decimal_odds) tuples covering every line
+    a book quotes for that market — typically several per match. The
+    exact line used to ``calibrate()`` the model is excluded via
+    ``calibration_totals_line`` since the model is fit to match it almost
+    exactly by construction, so comparing against itself is meaningless.
+    """
+    edges: list[CrossLineEdge] = []
+
+    totals_lines = {line for _bookmaker, line, _selection, _odds in totals_quotes if line != calibration_totals_line}
+    for line in totals_lines:
+        p_over, p_under, _p_push = totals_probabilities(matrix, line)
+        total = p_over + p_under
+        if total <= 0:
+            continue
+        fair_over, fair_under = p_over / total, p_under / total
+        for bookmaker, quote_line, selection, odds in totals_quotes:
+            if quote_line != line:
+                continue
+            model_p = {"over": fair_over, "under": fair_under}.get(selection)
+            if model_p is None:
+                continue
+            edges.append(_build_cross_line_edge("totals", line, bookmaker, selection, odds, model_p))
+
+    handicap_lines = {line for _bookmaker, line, _selection, _odds in handicap_quotes}
+    for line in handicap_lines:
+        p_home, p_away, _p_push = handicap_probabilities(matrix, line)
+        total = p_home + p_away
+        if total <= 0:
+            continue
+        fair_home, fair_away = p_home / total, p_away / total
+        for bookmaker, quote_line, selection, odds in handicap_quotes:
+            if quote_line != line:
+                continue
+            model_p = {"home": fair_home, "away": fair_away}.get(selection)
+            if model_p is None:
+                continue
+            edges.append(_build_cross_line_edge("asian_handicap", line, bookmaker, selection, odds, model_p))
+
+    edges = [e for e in edges if e.edge_percent >= min_edge_percent]
+    edges.sort(key=lambda e: e.edge_percent, reverse=True)
+    return edges
+
+
+def _build_cross_line_edge(
+    market: str, line: float, bookmaker: str, selection: str, odds: float, model_p: float
+) -> CrossLineEdge:
+    implied = 1.0 / odds
+    edge = model_p * odds - 1.0
+    return CrossLineEdge(
+        market=market,
+        line=line,
         selection=selection,
         bookmaker=bookmaker,
         decimal_odds=odds,

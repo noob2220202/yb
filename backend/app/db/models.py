@@ -83,8 +83,11 @@ class ArbitrageOpportunity(Base):
 
 
 class ValueEdge(Base):
-    """A model-vs-market probability mismatch on an exotic market (correct
-    score, winning margin). NOT a guaranteed-profit signal — see
+    """A model-vs-market probability mismatch — either on an exotic market
+    (correct score, winning margin) priced by any provider, or a same-
+    bookmaker cross-line mismatch (e.g. Pinnacle's own Totals 1.5 price
+    disagreeing with what its Totals-2.5-calibrated model implies). NOT a
+    guaranteed-profit signal either way — see
     app/engine/scoreline_model.py docstring.
     """
 
@@ -93,6 +96,7 @@ class ValueEdge(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), index=True)
     market: Mapped[str] = mapped_column(String(32))
+    line: Mapped[float | None] = mapped_column(Float, nullable=True)
     selection: Mapped[str] = mapped_column(String(32))
     bookmaker: Mapped[str] = mapped_column(String(64))
     quoted_decimal_odds: Mapped[float] = mapped_column(Float)

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_min_margin_percent: float = 1.0
+    telegram_min_edge_percent: float = 3.0
 
     @property
     def poll_sports_list(self) -> list[str]:

@@ -6,10 +6,14 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
    Asian handicap) — the same event & market priced differently enough
    across independent books that betting every outcome locks in a profit no
    matter the result.
-2. **Exotic-market value edges** (correct score, winning margin) — a
-   Poisson/Dixon-Coles scoreline model flags prices that diverge from its
-   own probability estimate. **This is not guaranteed profit**, it's a
-   ranked shortlist of positive-EV bets (see caveat below).
+2. **Value edges** — a Poisson/Dixon-Coles scoreline model flags prices
+   that diverge from its own probability estimate, two ways: exotic
+   markets (correct score, winning margin) priced by any book, and a
+   single book's OWN secondary Totals/Asian-Handicap lines disagreeing
+   with its own primary-line-calibrated model (works with just one
+   provider — see "피나클만 쓰는 경우" below). **Neither is guaranteed
+   profit**, it's a ranked shortlist of positive-EV bets (see caveat
+   below).
 
 ## Read this before you rely on it
 
@@ -31,6 +35,25 @@ A SaaS scaffold that pulls odds from multiple bookmakers and finds:
   Bookmakers can (and do) limit or close accounts that bet like an
   arbitrage bettor. This tool finds the numbers; using it is your call and
   your risk.
+
+## 피나클만 쓰는 경우 (`USE_DEMO_PROVIDER=false`, Odds API 없이)
+
+베팅을 피나클에서만 할 계획이라면 **"확정 수익 픽"(아비트리지) 섹션은 구조적으로
+계속 비어 있는 게 정상입니다** — 아비트리지는 정의상 최소 2개의 독립적인 배당이
+있어야 하고, 한 북메이커 자체 마켓 안에서는 마진(오버라운드) 때문에 항상 배당
+역수 합이 1보다 큽니다. 피나클은 특히 마진이 업계 최저 수준이고 마켓 간 가격도
+일관되게 매기기로 유명해서, 피나클 하나만으로 무위험 아비트리지가 나오는 건
+현실적으로 기대하면 안 됩니다.
+
+대신 이 설정에서 실제로 동작하는 건 **"가치 베팅 엣지"** 섹션입니다 —
+`app/engine/scoreline_model.py`의 `find_cross_line_edges`가 피나클이 한 경기에
+거는 여러 라인(토탈 1.5/2.5/3.5, 핸디캡 -1.5/-0.5/+0.5 등)을 서로 비교해서,
+"이 경기의 주 라인으로 캘리브레이션한 모델이 보는 확률과, 피나클 자신이 다른
+라인에 매긴 가격이 어긋나는" 경우를 찾습니다. 북메이커가 하나뿐이면 비교 대상도
+자동으로 전부 그 북메이커 자신의 가격이 되므로, 별도 설정 없이 바로 "피나클
+내부 가격 정합성 검사"로 동작합니다. 다만 **확정 수익이 아니고, 피나클이
+정확히 이런 불일치를 최소화하도록 운영되는 북메이커라 발견 빈도는 낮을 것으로
+예상됩니다** — 그게 정상입니다.
 
 ## Architecture
 
@@ -85,9 +108,11 @@ excluded outright rather than mispriced.
 `app/engine/scoreline_model.py` is a different kind of tool: it estimates a
 full scoreline probability grid from a match's own devigged 1X2 + Totals
 prices (Dixon-Coles-adjusted independent Poisson, calibrated by
-least-squares), then compares that model's view against quoted exotic
-prices. This is a **value-betting** tool, not an arbitrage engine — keep
-that distinction when presenting results to users.
+least-squares), then compares that model's view against quoted prices —
+either an exotic market (`find_value_edges`) or the same match's other
+Totals/Asian-Handicap lines (`find_cross_line_edges`, the one that keeps
+working with a single provider). This is a **value-betting** tool, not an
+arbitrage engine — keep that distinction when presenting results to users.
 
 ## Running locally
 
@@ -181,11 +206,12 @@ docker-compose reads) once you have real accounts.
 ```
 TELEGRAM_BOT_TOKEN=<@BotFather 로 발급받은 토큰>
 TELEGRAM_CHAT_ID=<봇과 대화한 채팅 ID>
-TELEGRAM_MIN_MARGIN_PERCENT=1.0   # 이 마진(%) 이상만 알림
+TELEGRAM_MIN_MARGIN_PERCENT=1.0   # 확정 수익 픽: 이 마진(%) 이상만 알림
+TELEGRAM_MIN_EDGE_PERCENT=3.0     # 가치 베팅 엣지: 이 모델 엣지(%) 이상만 알림
 ```
 
-매 폴링 사이클마다 **새로 나타난** 확정픽만(이미 알림을 보낸, 여전히 살아있는
-픽은 재알림하지 않음) 박스별로 정리해 하나의 메시지로 보냅니다:
+매 폴링 사이클마다 **새로 나타난** 것만(이미 알림을 보낸, 여전히 살아있는 픽/엣지는
+재알림하지 않음) 박스별로 정리해 채널 두 개로 나눠 보냅니다:
 
 ```
 🎯 확정 수익 픽 2건 발견
@@ -200,12 +226,24 @@ TELEGRAM_MIN_MARGIN_PERCENT=1.0   # 이 마진(%) 이상만 알림
 [2] ...
 ```
 
+```
+🔎 가치 베팅 엣지 1건 발견 (확정 수익 아님)
+
+[1] Man City vs Newcastle
+마켓: Totals (라인 3.5) · 선택: over
+DemoBookA @ 4.72  (모델 엣지 +35.0%)
+```
+
+피나클만 설정한 경우 위쪽 채널은 거의 항상 비어 있고(정상입니다 — "피나클만 쓰는
+경우" 참고), 아래쪽 채널이 실질적으로 계속 오는 알림이 됩니다.
+
 ## Current scope / what's next
 
 Shipped: core-market arbitrage (1X2, 2-way moneyline, totals, Asian
-handicap, BTTS), push-aware math, stake calculator, exotic-market value
-model (correct score, winning margin), API-key auth, live pick-box
-dashboard, 신규 확정픽 브라우저 알림(+소리), 텔레그램 서버 사이드 알림,
+handicap, BTTS), push-aware math, stake calculator, value-edge model
+(exotic markets + same-book cross-line consistency — works with just
+Pinnacle), API-key auth, live pick-box dashboard, 신규 확정픽 브라우저
+알림(+소리), 확정픽/가치엣지 각각 별도 채널의 텔레그램 서버 사이드 알림,
 크로스 프로바이더 아비트리지 병합.
 
 Not built yet (natural next steps, intentionally out of scope for this

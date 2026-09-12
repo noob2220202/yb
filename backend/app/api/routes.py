@@ -121,6 +121,7 @@ async def list_value_edges(
             event=f"{event.home_team} vs {event.away_team}",
             sport=event.sport,
             market=edge.market,
+            line=edge.line,
             selection=edge.selection,
             bookmaker=edge.bookmaker,
             quoted_decimal_odds=edge.quoted_decimal_odds,

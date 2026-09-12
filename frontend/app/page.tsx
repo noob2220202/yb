@@ -232,9 +232,10 @@ export default function Page() {
           <span className="count">{valueEdges?.length ?? 0}건</span>
         </div>
         <p className="hint">
-          정확한 스코어·승리마진처럼 무위험 계산이 불가능한 마켓에서, 자체 스코어라인 모델과 실제
-          배당의 괴리를 찾은 결과입니다. <strong>확정 수익이 아닙니다</strong> — 참고용 순위표로만
-          활용하세요.
+          정확한 스코어·승리마진처럼 무위험 계산이 불가능한 마켓, 그리고 같은 북메이커가 매긴
+          다른 라인(예: 토탈 2.5 대비 1.5)끼리의 가격 불일치까지 — 자체 스코어라인 모델과 실제
+          배당의 괴리를 찾은 결과입니다. 북메이커가 피나클 하나뿐이어도 계산됩니다.{" "}
+          <strong>확정 수익이 아닙니다</strong> — 참고용 순위표로만 활용하세요.
         </p>
         {valueEdges === null ? (
           <div className="empty">불러오는 중…</div>
@@ -377,7 +378,7 @@ function ValueEdgeBox({ edge }: { edge: ValueEdge }) {
         <div>
           <div className="pick-event">{edge.event}</div>
           <div className="pick-meta">
-            <span>{marketLabel(edge.market, null)}</span>
+            <span>{marketLabel(edge.market, edge.line)}</span>
             <span>·</span>
             <span>{edge.selection}</span>
           </div>

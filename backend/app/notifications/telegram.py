@@ -15,7 +15,7 @@ import json
 import httpx
 
 from app.config import get_settings
-from app.db.models import ArbitrageOpportunity, Event
+from app.db.models import ArbitrageOpportunity, Event, ValueEdge
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -36,6 +36,21 @@ def format_pick_box(index: int, event: Event, opportunity: ArbitrageOpportunity)
 
 def format_digest(boxes: list[str]) -> str:
     header = f"🎯 확정 수익 픽 {len(boxes)}건 발견\n"
+    return header + "\n\n".join(boxes)
+
+
+def format_value_edge_box(index: int, event: Event, edge: ValueEdge) -> str:
+    market_label = edge.market.replace("_", " ").title()
+    line_part = f" (라인 {edge.line})" if edge.line is not None else ""
+    return (
+        f"[{index}] {event.home_team} vs {event.away_team}\n"
+        f"마켓: {market_label}{line_part} · 선택: {edge.selection}\n"
+        f"{edge.bookmaker} @ {edge.quoted_decimal_odds:.2f}  (모델 엣지 +{edge.edge_percent:.1f}%)"
+    )
+
+
+def format_value_edge_digest(boxes: list[str]) -> str:
+    header = f"🔎 가치 베팅 엣지 {len(boxes)}건 발견 (확정 수익 아님)\n"
     return header + "\n\n".join(boxes)
 
 

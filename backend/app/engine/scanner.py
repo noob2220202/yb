@@ -151,7 +151,17 @@ def _pick_calibration_inputs(
 
 async def scan_value_edges(session: AsyncSession, quotes: list[OddsQuote]) -> list[ValueEdge]:
     """Per event: calibrate the scoreline model from 1X2 + Totals, then
-    flag exotic-market prices that diverge from the model's own view.
+    flag two kinds of divergence from the model's own view:
+
+    1. Exotic markets (correct score / winning margin) priced by any
+       provider — needs a book that quotes those.
+    2. Any book's OTHER Totals/Asian-Handicap lines on the same match —
+       needs nothing but a book that quotes more than one line per match
+       (Pinnacle always does). With only one provider configured, every
+       quote compared is necessarily that same book's own price, so this
+       becomes a same-book internal-consistency check for free — the one
+       signal that still works with only a single provider.
+
     Skipped for events without enough core-market data to calibrate.
     """
     edges: list[ValueEdge] = []
@@ -167,14 +177,31 @@ async def scan_value_edges(session: AsyncSession, quotes: list[OddsQuote]) -> li
         margin_quotes = [
             (q.bookmaker, q.selection, q.decimal_odds) for q in event_quotes if q.market == MarketType.WINNING_MARGIN
         ]
-        if not correct_score_quotes and not margin_quotes:
-            continue
+        totals_quotes = [
+            (q.bookmaker, q.line, q.selection, q.decimal_odds)
+            for q in event_quotes
+            if q.market == MarketType.TOTALS and q.line is not None
+        ]
+        handicap_quotes = [
+            (q.bookmaker, q.line, q.selection, q.decimal_odds)
+            for q in event_quotes
+            if q.market == MarketType.ASIAN_HANDICAP and q.line is not None
+        ]
 
         calibrated = scoreline_model.calibrate(*calibration_inputs)
-        found = scoreline_model.find_value_edges(
+        calibration_totals_line = calibration_inputs[3]
+
+        exotic_found = scoreline_model.find_value_edges(
             calibrated.matrix, correct_score_quotes, margin_quotes, min_edge_percent=MIN_VALUE_EDGE_PERCENT
         )
-        if not found:
+        cross_line_found = scoreline_model.find_cross_line_edges(
+            calibrated.matrix,
+            totals_quotes,
+            handicap_quotes,
+            calibration_totals_line=calibration_totals_line,
+            min_edge_percent=MIN_VALUE_EDGE_PERCENT,
+        )
+        if not exotic_found and not cross_line_found:
             continue
 
         event_result = await session.execute(select(Event).where(Event.event_key == event_key))
@@ -182,11 +209,28 @@ async def scan_value_edges(session: AsyncSession, quotes: list[OddsQuote]) -> li
         if event is None:
             continue
 
-        for edge in found:
+        for edge in exotic_found:
             market = MarketType.CORRECT_SCORE if "-" in edge.selection else MarketType.WINNING_MARGIN
             record = ValueEdge(
                 event_id=event.id,
                 market=market.value,
+                line=None,
+                selection=edge.selection,
+                bookmaker=edge.bookmaker,
+                quoted_decimal_odds=edge.decimal_odds,
+                model_probability=edge.model_probability,
+                implied_probability=edge.implied_probability,
+                edge_percent=edge.edge_percent,
+                detected_at=datetime.now(timezone.utc),
+            )
+            session.add(record)
+            edges.append(record)
+
+        for edge in cross_line_found:
+            record = ValueEdge(
+                event_id=event.id,
+                market=edge.market,
+                line=edge.line,
                 selection=edge.selection,
                 bookmaker=edge.bookmaker,
                 quoted_decimal_odds=edge.decimal_odds,

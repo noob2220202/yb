@@ -6,9 +6,14 @@ import pytest
 import app.scheduler as scheduler_module
 from app.core.enums import MarketType, Sport
 from app.core.schemas import OddsQuote
-from app.db.models import ArbitrageOpportunity, Event
+from app.db.models import ArbitrageOpportunity, Event, ValueEdge
 from app.engine.scanner import run_scan_cycle
-from app.notifications.telegram import format_digest, format_pick_box
+from app.notifications.telegram import (
+    format_digest,
+    format_pick_box,
+    format_value_edge_box,
+    format_value_edge_digest,
+)
 from app.providers.base import OddsProvider
 from app.providers.demo import ARSENAL_CHELSEA
 
@@ -44,6 +49,23 @@ def make_opportunity(event_id: int, margin: float = 2.0, market: str = "moneylin
         margin_percent=margin,
         push_possible=False,
         legs_json=json.dumps([{"selection": "home", "bookmaker": "BookA", "decimal_odds": 2.1}]),
+        detected_at=datetime.now(timezone.utc),
+    )
+
+
+def make_value_edge(
+    event_id: int, edge_percent: float = 5.0, market: str = "totals", line: float | None = 3.5
+) -> ValueEdge:
+    return ValueEdge(
+        event_id=event_id,
+        market=market,
+        line=line,
+        selection="over",
+        bookmaker="Pinnacle",
+        quoted_decimal_odds=4.72,
+        model_probability=0.286,
+        implied_probability=0.212,
+        edge_percent=edge_percent,
         detected_at=datetime.now(timezone.utc),
     )
 
@@ -234,6 +256,123 @@ async def test_notify_noop_when_telegram_not_configured(db_session, monkeypatch)
     await db_session.flush()
 
     await scheduler_module._notify_new_opportunities(db_session, [opp])
+    assert called is False
+
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------
+# _notify_new_value_edges: same pattern, separate channel/threshold —
+# this is the one that actually fires when only Pinnacle is configured.
+# ---------------------------------------------------------------------
+
+
+def test_format_value_edge_box_contains_key_fields():
+    event = make_event()
+    edge = make_value_edge(event_id=1, edge_percent=34.98, market="totals", line=3.5)
+    text = format_value_edge_box(1, event, edge)
+    assert "A vs B" in text
+    assert "Pinnacle" in text
+    assert "+35.0%" in text
+
+
+def test_format_value_edge_digest_marks_not_guaranteed():
+    text = format_value_edge_digest(["box-one"])
+    assert "확정" in text and "아님" in text
+    assert "box-one" in text
+
+
+@pytest.mark.asyncio
+async def test_notify_value_edges_dedupes_still_active(db_session, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    sent = []
+
+    async def fake_send(text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
+    scheduler_module._notified_edge_keys.clear()
+
+    event = make_event()
+    db_session.add(event)
+    await db_session.flush()
+    edge = make_value_edge(event.id, edge_percent=10.0)
+    db_session.add(edge)
+    await db_session.flush()
+
+    await scheduler_module._notify_new_value_edges(db_session, [edge])
+    assert len(sent) == 1
+    assert "A vs B" in sent[0]
+
+    await scheduler_module._notify_new_value_edges(db_session, [edge])
+    assert len(sent) == 1  # 같은 엣지가 그대로면 재알림하지 않는다
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_notify_value_edges_skips_below_edge_threshold(db_session, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+    monkeypatch.setenv("TELEGRAM_MIN_EDGE_PERCENT", "20.0")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    sent = []
+
+    async def fake_send(text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
+    scheduler_module._notified_edge_keys.clear()
+
+    event = make_event(event_key="soccer:g-vs-h:2026-01-01", home_team="G", away_team="H")
+    db_session.add(event)
+    await db_session.flush()
+    edge = make_value_edge(event.id, edge_percent=5.0)  # 20% 임계값 미달
+    db_session.add(edge)
+    await db_session.flush()
+
+    await scheduler_module._notify_new_value_edges(db_session, [edge])
+    assert sent == []
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_notify_value_edges_noop_when_telegram_not_configured(db_session, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    called = False
+
+    async def fake_send(text):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
+    scheduler_module._notified_edge_keys.clear()
+
+    event = make_event(event_key="soccer:i-vs-j:2026-01-01", home_team="I", away_team="J")
+    db_session.add(event)
+    await db_session.flush()
+    edge = make_value_edge(event.id, edge_percent=50.0)
+    db_session.add(edge)
+    await db_session.flush()
+
+    await scheduler_module._notify_new_value_edges(db_session, [edge])
     assert called is False
 
     get_settings.cache_clear()

@@ -115,4 +115,19 @@ class DemoProvider(OddsProvider):
         q.append(OddsQuote(e, "DemoBookSoft", MarketType.CORRECT_SCORE, "2-1", 13.00))
         q.append(OddsQuote(e, "DemoBookSoft", MarketType.CORRECT_SCORE, "1-0", 7.00))
         q.append(OddsQuote(e, "DemoBookSoft", MarketType.WINNING_MARGIN, "home_by_1", 3.20))
+
+        # Same-bookmaker cross-line demo (works with Pinnacle alone, no
+        # second provider needed): DemoBookA's OWN secondary lines on this
+        # match, calibrated against its own 2.5 total above. Only one side
+        # per line is quoted here on purpose — with zero-vig "fair" prices,
+        # quoting both sides of the same line from the same book would sum
+        # to ~1 and could round into looking like a same-book arbitrage,
+        # which doesn't happen in reality (see scanner.py) and would be a
+        # misleading fixture.
+        # Totals 1.5 "under" is priced fair (~4.02) -> should NOT be flagged.
+        q.append(OddsQuote(e, "DemoBookA", MarketType.TOTALS, "under", 4.02, line=1.5))
+        # Totals 3.5 "over" is priced well above its own fair odds (~3.50) -> SHOULD be flagged.
+        q.append(OddsQuote(e, "DemoBookA", MarketType.TOTALS, "over", 4.72, line=3.5))
+        # Handicap -1.5 "away" is priced fair (~1.63) -> should NOT be flagged.
+        q.append(OddsQuote(e, "DemoBookA", MarketType.ASIAN_HANDICAP, "away", 1.63, line=-1.5))
         return q

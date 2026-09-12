@@ -40,6 +40,7 @@ export interface ValueEdge {
   event: string;
   sport: string;
   market: string;
+  line: number | null;
   selection: string;
   bookmaker: string;
   quoted_decimal_odds: number;

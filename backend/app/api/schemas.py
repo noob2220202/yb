@@ -47,6 +47,7 @@ class ValueEdgeOut(BaseModel):
     event: str
     sport: str
     market: str
+    line: float | None
     selection: str
     bookmaker: str
     quoted_decimal_odds: float

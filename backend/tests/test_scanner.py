@@ -1,10 +1,13 @@
-import pytest
+from datetime import datetime, timezone
 
-from app.core.enums import Sport
-from app.db.models import ArbitrageOpportunity, OddsSnapshot, ValueEdge
-from app.engine.scanner import run_scan_cycle
-from app.providers.demo import DemoProvider
+import pytest
 from sqlalchemy import select
+
+from app.core.enums import MarketType, Sport
+from app.core.schemas import NormalizedEvent, OddsQuote
+from app.db.models import ArbitrageOpportunity, OddsSnapshot, ValueEdge
+from app.engine.scanner import run_scan_cycle, scan_arbitrage, scan_value_edges, store_quotes
+from app.providers.demo import DemoProvider
 
 
 @pytest.mark.asyncio
@@ -21,6 +24,12 @@ async def test_full_scan_cycle_persists_snapshots_arbs_and_edges(db_session):
     # The deliberately generous correct-score price should be flagged.
     assert len(edges) >= 1
     assert any(e.selection == "2-1" and e.bookmaker == "DemoBookSoft" for e in edges)
+    # ...and so should the same-bookmaker (DemoBookA-only) cross-line
+    # mispricing on Totals 3.5, while its fair-priced siblings (Totals 1.5,
+    # Asian Handicap -1.5) should NOT be.
+    assert any(e.market == "totals" and e.line == 3.5 and e.bookmaker == "DemoBookA" for e in edges)
+    assert not any(e.line == 1.5 for e in edges)
+    assert not any(e.market == "asian_handicap" and e.line == -1.5 for e in edges)
 
     snapshot_count = (await db_session.execute(select(OddsSnapshot))).scalars().all()
     assert len(snapshot_count) == len(quotes)
@@ -41,3 +50,43 @@ async def test_rerunning_scan_does_not_dedupe_but_reflects_latest_odds(db_sessio
 
     all_stored = (await db_session.execute(select(ArbitrageOpportunity))).scalars().all()
     assert len(all_stored) == 6  # two full cycles worth, kept as a history
+
+
+@pytest.mark.asyncio
+async def test_single_bookmaker_finds_value_edges_but_never_arbitrage(db_session):
+    """Regression/spec test for 'Pinnacle only' usage: with every quote
+    coming from exactly one bookmaker, the arbitrage engine must find
+    nothing (a single book's own market can't be a same-book arbitrage —
+    see app/engine/arbitrage.py), while the cross-line consistency scan
+    still works, since it only ever needs one book's own multiple lines.
+    """
+    event = NormalizedEvent(
+        sport=Sport.SOCCER,
+        home_team="Solo",
+        away_team="Book",
+        commence_time=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        league="Test",
+    )
+    BOOK = "Pinnacle"
+    quotes = [
+        OddsQuote(event, BOOK, MarketType.MONEYLINE_3WAY, "home", 1.50),
+        OddsQuote(event, BOOK, MarketType.MONEYLINE_3WAY, "draw", 4.50),
+        OddsQuote(event, BOOK, MarketType.MONEYLINE_3WAY, "away", 6.50),
+        OddsQuote(event, BOOK, MarketType.TOTALS, "over", 1.90, line=2.5),
+        OddsQuote(event, BOOK, MarketType.TOTALS, "under", 1.95, line=2.5),
+        # Same book's own secondary line, deliberately mispriced relative
+        # to its own primary-line-calibrated model (fair odds ~3.50).
+        OddsQuote(event, BOOK, MarketType.TOTALS, "over", 4.72, line=3.5),
+    ]
+
+    await store_quotes(db_session, quotes, source="test")
+
+    opportunities = await scan_arbitrage(db_session, quotes)
+    assert opportunities == []  # one bookmaker alone can never self-arbitrage
+
+    edges = await scan_value_edges(db_session, quotes)
+    assert len(edges) == 1
+    assert edges[0].bookmaker == BOOK
+    assert edges[0].market == "totals"
+    assert edges[0].line == 3.5
+    assert edges[0].edge_percent > 2.0
