@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -7,18 +8,36 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.auth import require_api_key
 from app.api.schemas import (
     LegOut,
+    ManualCalculationIn,
+    ManualCalculationOut,
     OpportunityOut,
     StakeLegOut,
     StakePlanOut,
     ValueEdgeOut,
 )
-from app.core.enums import MarketType
+from app.core.enums import MarketType, Sport
+from app.core.schemas import NormalizedEvent, OddsQuote
 from app.db.models import ArbitrageOpportunity, Event, ValueEdge
 from app.db.session import get_session
-from app.engine.arbitrage import ArbitrageResult, Leg, allocate_stakes
+from app.engine.arbitrage import (
+    ArbitrageResult,
+    Leg,
+    allocate_stakes,
+    expected_selections,
+    find_arbitrage,
+    is_quarter_line,
+    is_supported_line,
+)
 from app.scheduler import poll_and_scan
 
 router = APIRouter()
+
+# Placeholder event for the manual calculator below — find_arbitrage never
+# reads event fields, it only needs every quote's (market, line) to match,
+# so this exists purely to satisfy OddsQuote's required ``event`` field.
+_CALCULATOR_EVENT = NormalizedEvent(
+    sport=Sport.SOCCER, home_team="A", away_team="B", commence_time=datetime(2000, 1, 1, tzinfo=timezone.utc)
+)
 
 
 @router.get("/health")
@@ -105,6 +124,73 @@ async def stake_plan(
         guaranteed_profit=plan.guaranteed_profit,
         profit_percent=plan.profit_percent,
         push_possible=plan.push_possible,
+        legs=[StakeLegOut(**leg.__dict__) for leg in plan.legs],
+    )
+
+
+@router.post(
+    "/calculator/arbitrage",
+    response_model=ManualCalculationOut,
+    dependencies=[Depends(require_api_key)],
+)
+async def calculate_manual_arbitrage(payload: ManualCalculationIn) -> ManualCalculationOut:
+    """Manual what-if calculator — no scanner/DB involved. Lets a user type
+    in odds they found by hand (any bookmakers, any market this engine
+    supports) and see whether it's a genuine arbitrage plus exactly how
+    much to stake on each side. Unlike ``/opportunities/{id}/stake-plan``,
+    a non-arbitrage combination is NOT an error here: it's still valid,
+    useful information ("this guarantees a loss of X%, don't bet it"),
+    so ``allow_negative=True`` is used throughout.
+    """
+    try:
+        market = MarketType(payload.market)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"알 수 없는 마켓입니다: {payload.market}") from exc
+
+    required = expected_selections(market)
+    if not required:
+        raise HTTPException(status_code=400, detail="이 마켓은 수동 계산기에서 지원하지 않습니다")
+
+    if not is_supported_line(market, payload.line):
+        raise HTTPException(status_code=400, detail="이 마켓에는 라인이 필요하거나, 지원하지 않는 라인입니다")
+
+    got_selections = [leg.selection for leg in payload.legs]
+    if set(got_selections) != set(required) or len(got_selections) != len(required):
+        raise HTTPException(
+            status_code=400,
+            detail=f"이 마켓에는 다음 선택지가 정확히 하나씩 필요합니다: {sorted(required)}",
+        )
+
+    quotes = [
+        OddsQuote(
+            event=_CALCULATOR_EVENT,
+            bookmaker=leg.bookmaker or f"북메이커{i + 1}",
+            market=market,
+            selection=leg.selection,
+            decimal_odds=leg.decimal_odds,
+            line=payload.line,
+        )
+        for i, leg in enumerate(payload.legs)
+    ]
+
+    result = find_arbitrage(quotes)
+    if result is None:
+        # Only reachable if find_arbitrage's own (redundant) validation
+        # disagrees with the checks above -- surface as a clear 400
+        # rather than a 500.
+        raise HTTPException(status_code=400, detail="계산할 수 없는 조합입니다")
+
+    plan = allocate_stakes(result, payload.total_stake, allow_negative=True)
+
+    return ManualCalculationOut(
+        is_arbitrage=result.is_arbitrage,
+        total_implied_probability=result.total_implied_probability,
+        margin_percent=result.margin_percent,
+        push_possible=result.push_possible,
+        quarter_line=is_quarter_line(market, payload.line),
+        total_stake=plan.total_stake,
+        guaranteed_profit=plan.guaranteed_profit,
+        profit_percent=plan.profit_percent,
         legs=[StakeLegOut(**leg.__dict__) for leg in plan.legs],
     )
 

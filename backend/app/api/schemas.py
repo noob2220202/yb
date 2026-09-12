@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class LegOut(BaseModel):
@@ -37,6 +37,31 @@ class StakePlanOut(BaseModel):
     guaranteed_profit: float
     profit_percent: float
     push_possible: bool
+    legs: list[StakeLegOut]
+
+
+class ManualLegIn(BaseModel):
+    selection: str
+    bookmaker: str = ""
+    decimal_odds: float = Field(gt=1.0)
+
+
+class ManualCalculationIn(BaseModel):
+    market: str
+    line: float | None = None
+    total_stake: float = Field(gt=0)
+    legs: list[ManualLegIn]
+
+
+class ManualCalculationOut(BaseModel):
+    is_arbitrage: bool
+    total_implied_probability: float
+    margin_percent: float
+    push_possible: bool
+    quarter_line: bool
+    total_stake: float
+    guaranteed_profit: float
+    profit_percent: float
     legs: list[StakeLegOut]
 
 

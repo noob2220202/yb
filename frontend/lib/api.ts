@@ -35,6 +35,31 @@ export interface StakePlan {
   legs: StakeLeg[];
 }
 
+export interface ManualLegInput {
+  selection: string;
+  bookmaker: string;
+  decimal_odds: number;
+}
+
+export interface ManualCalculationRequest {
+  market: string;
+  line: number | null;
+  total_stake: number;
+  legs: ManualLegInput[];
+}
+
+export interface ManualCalculation {
+  is_arbitrage: boolean;
+  total_implied_probability: number;
+  margin_percent: number;
+  push_possible: boolean;
+  quarter_line: boolean;
+  total_stake: number;
+  guaranteed_profit: number;
+  profit_percent: number;
+  legs: StakeLeg[];
+}
+
 export interface ValueEdge {
   id: number;
   event: string;
@@ -72,4 +97,24 @@ export function fetchValueEdges(): Promise<ValueEdge[]> {
 
 export function fetchStakePlan(opportunityId: number, totalStake: number): Promise<StakePlan> {
   return apiFetch<StakePlan>(`/opportunities/${opportunityId}/stake-plan?total_stake=${totalStake}`);
+}
+
+export async function calculateManualArbitrage(req: ManualCalculationRequest): Promise<ManualCalculation> {
+  const res = await fetch(`${API_BASE_URL}/calculator/arbitrage`, {
+    method: "POST",
+    headers: { "x-api-key": API_KEY, "content-type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    let detail = `요청 실패 (${res.status})`;
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      // 응답이 JSON이 아니면 기본 메시지 사용
+    }
+    throw new Error(detail);
+  }
+  return res.json() as Promise<ManualCalculation>;
 }

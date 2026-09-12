@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ManualCalculation,
   Opportunity,
   StakePlan,
   ValueEdge,
+  calculateManualArbitrage,
   fetchOpportunities,
   fetchStakePlan,
   fetchValueEdges,
@@ -13,6 +15,21 @@ import {
 const REFRESH_MS = 15000;
 const THRESHOLD_KEY = "yb.notifyThreshold";
 const NOTIFY_KEY = "yb.notifyEnabled";
+
+interface ManualMarketOption {
+  value: string;
+  label: string;
+  selections: string[];
+  needsLine: boolean;
+}
+
+const MANUAL_MARKETS: ManualMarketOption[] = [
+  { value: "moneyline_3way", label: "승무패 (승/무/패)", selections: ["home", "draw", "away"], needsLine: false },
+  { value: "moneyline_2way", label: "승패 (무승부 없음)", selections: ["home", "away"], needsLine: false },
+  { value: "totals", label: "오버언더 (총점)", selections: ["over", "under"], needsLine: true },
+  { value: "asian_handicap", label: "아시안 핸디캡 (쿼터 라인 지원)", selections: ["home", "away"], needsLine: true },
+  { value: "btts", label: "양팀득점 (BTTS)", selections: ["yes", "no"], needsLine: false },
+];
 
 function marketLabel(market: string, line: number | null): string {
   const base = market
@@ -250,7 +267,203 @@ export default function Page() {
           </div>
         )}
       </section>
+
+      <ManualCalculator />
     </main>
+  );
+}
+
+function ManualCalculator() {
+  const [marketValue, setMarketValue] = useState(MANUAL_MARKETS[0].value);
+  const market = MANUAL_MARKETS.find((m) => m.value === marketValue) ?? MANUAL_MARKETS[0];
+  const [line, setLine] = useState("");
+  const [totalStake, setTotalStake] = useState(100000);
+  const [legInputs, setLegInputs] = useState<Record<string, { bookmaker: string; odds: string }>>({});
+  const [result, setResult] = useState<ManualCalculation | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  function selectMarket(value: string) {
+    setMarketValue(value);
+    setLegInputs({});
+    setResult(null);
+    setErrorMsg(null);
+  }
+
+  function updateLeg(selection: string, field: "bookmaker" | "odds", value: string) {
+    setLegInputs((prev) => ({
+      ...prev,
+      [selection]: { bookmaker: prev[selection]?.bookmaker ?? "", odds: prev[selection]?.odds ?? "", [field]: value },
+    }));
+  }
+
+  async function calculate() {
+    setErrorMsg(null);
+
+    const legs = market.selections.map((selection) => {
+      const input = legInputs[selection];
+      return {
+        selection,
+        bookmaker: input?.bookmaker?.trim() ?? "",
+        decimal_odds: Number(input?.odds ?? ""),
+      };
+    });
+
+    if (legs.some((leg) => !Number.isFinite(leg.decimal_odds) || leg.decimal_odds <= 1)) {
+      setErrorMsg("모든 선택지에 1보다 큰 배당을 입력하세요.");
+      return;
+    }
+    const lineValue = market.needsLine ? Number(line) : null;
+    if (market.needsLine && (line.trim() === "" || !Number.isFinite(lineValue))) {
+      setErrorMsg("이 마켓은 라인(예: 2.5, -0.25) 입력이 필요합니다.");
+      return;
+    }
+    if (!Number.isFinite(totalStake) || totalStake <= 0) {
+      setErrorMsg("총 베팅 금액은 0보다 커야 합니다.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await calculateManualArbitrage({
+        market: market.value,
+        line: lineValue,
+        total_stake: totalStake,
+        legs,
+      });
+      setResult(res);
+    } catch (err) {
+      setResult(null);
+      setErrorMsg((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section>
+      <div className="section-head">
+        <h2>수동 계산기</h2>
+      </div>
+      <p className="hint">
+        직접 찾은 배당을 넣으면 확정 수익(아비트리지) 여부와, 각 선택지에 얼마씩 걸어야
+        모든 결과에서 수익이 같아지는지 계산해줍니다. 스캐너가 찾은 픽과는 별개로 언제든
+        직접 확인할 수 있어요.
+      </p>
+
+      <div className="pick-box calc-box">
+        <div className="calc-form">
+          <label className="calc-field">
+            <span>마켓</span>
+            <select value={marketValue} onChange={(e) => selectMarket(e.target.value)}>
+              {MANUAL_MARKETS.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {market.needsLine && (
+            <label className="calc-field">
+              <span>라인</span>
+              <input
+                type="number"
+                step={0.25}
+                placeholder="예: 2.5, -0.25"
+                value={line}
+                onChange={(e) => setLine(e.target.value)}
+              />
+            </label>
+          )}
+          <label className="calc-field">
+            <span>총 베팅 금액</span>
+            <input
+              type="number"
+              min={1}
+              value={totalStake}
+              onChange={(e) => setTotalStake(Number(e.target.value))}
+            />
+          </label>
+        </div>
+
+        <div className="calc-legs">
+          {market.selections.map((selection) => (
+            <div className="calc-leg-row" key={selection}>
+              <span className="calc-leg-label">{selection}</span>
+              <input
+                type="text"
+                placeholder="북메이커 (선택 입력)"
+                value={legInputs[selection]?.bookmaker ?? ""}
+                onChange={(e) => updateLeg(selection, "bookmaker", e.target.value)}
+              />
+              <input
+                type="number"
+                step={0.01}
+                min={1.01}
+                placeholder="배당"
+                value={legInputs[selection]?.odds ?? ""}
+                onChange={(e) => updateLeg(selection, "odds", e.target.value)}
+              />
+            </div>
+          ))}
+        </div>
+
+        <button className="btn" onClick={calculate} disabled={loading}>
+          {loading ? "계산 중…" : "계산하기"}
+        </button>
+
+        {errorMsg && <div className="calc-error">{errorMsg}</div>}
+
+        {result && (
+          <div className="calc-result">
+            <div className={`profit-line${result.is_arbitrage ? "" : " calc-loss"}`}>
+              {result.is_arbitrage ? (
+                <>
+                  확정 수익: <strong>{result.guaranteed_profit.toFixed(0)}</strong> (
+                  {result.profit_percent.toFixed(2)}%)
+                </>
+              ) : (
+                <>
+                  ⚠️ 확정 수익 아님 — 이 배당대로 걸면 결과와 무관하게{" "}
+                  <strong>{Math.abs(result.guaranteed_profit).toFixed(0)}</strong> 손실 (
+                  {result.profit_percent.toFixed(2)}%)
+                </>
+              )}
+              {result.push_possible && " · 푸시 가능(최악의 경우 원금 보전)"}
+            </div>
+            {result.quarter_line && (
+              <p className="hint">
+                쿼터 라인(.25/.75)은 무승부/특정 스코어차에서 절반만 이기거나 지는 경우가
+                있어요 — 위 베팅액은 그 경우까지 포함한 최악의 시나리오 기준으로 계산된
+                값입니다.
+              </p>
+            )}
+            <table className="stake-table">
+              <thead>
+                <tr>
+                  <th>선택</th>
+                  <th>북메이커</th>
+                  <th>배당</th>
+                  <th>베팅액</th>
+                  <th>환급액</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.legs.map((leg) => (
+                  <tr key={`${leg.selection}-${leg.bookmaker}`}>
+                    <td>{leg.selection}</td>
+                    <td>{leg.bookmaker}</td>
+                    <td>{leg.decimal_odds.toFixed(2)}</td>
+                    <td>{leg.stake.toFixed(0)}</td>
+                    <td>{leg.payout.toFixed(0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 

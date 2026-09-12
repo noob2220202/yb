@@ -116,3 +116,131 @@ def test_admin_poll_triggers_another_cycle(api_client):
     # Now two cycles' worth should be stored.
     resp = api_client.get("/opportunities", headers={"x-api-key": "test-key"}, params={"limit": 500})
     assert len(resp.json()) == 8
+
+
+# ---------------------------------------------------------------------
+# /calculator/arbitrage: manual odds entry, no DB/scanner involved.
+# ---------------------------------------------------------------------
+
+
+def test_calculator_requires_api_key(api_client):
+    resp = api_client.post(
+        "/calculator/arbitrage",
+        json={
+            "market": "moneyline_2way",
+            "total_stake": 1000,
+            "legs": [
+                {"selection": "home", "bookmaker": "A", "decimal_odds": 2.10},
+                {"selection": "away", "bookmaker": "B", "decimal_odds": 2.10},
+            ],
+        },
+    )
+    assert resp.status_code in (401, 422)
+
+
+def test_calculator_finds_genuine_two_way_arbitrage(api_client):
+    resp = api_client.post(
+        "/calculator/arbitrage",
+        headers={"x-api-key": "test-key"},
+        json={
+            "market": "moneyline_2way",
+            "total_stake": 100000,
+            "legs": [
+                {"selection": "home", "bookmaker": "북메이커A", "decimal_odds": 2.10},
+                {"selection": "away", "bookmaker": "북메이커B", "decimal_odds": 2.10},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_arbitrage"] is True
+    assert body["guaranteed_profit"] > 0
+    assert sum(leg["stake"] for leg in body["legs"]) == pytest.approx(100000, abs=1)
+    # Both sides pay out (approximately) the same amount regardless of outcome.
+    payouts = [leg["payout"] for leg in body["legs"]]
+    assert max(payouts) - min(payouts) < 1.0
+
+
+def test_calculator_reports_negative_margin_instead_of_erroring(api_client):
+    resp = api_client.post(
+        "/calculator/arbitrage",
+        headers={"x-api-key": "test-key"},
+        json={
+            "market": "moneyline_2way",
+            "total_stake": 1000,
+            "legs": [
+                {"selection": "home", "bookmaker": "A", "decimal_odds": 1.80},
+                {"selection": "away", "bookmaker": "B", "decimal_odds": 1.80},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_arbitrage"] is False
+    assert body["guaranteed_profit"] < 0
+
+
+def test_calculator_handles_quarter_line_asian_handicap(api_client):
+    resp = api_client.post(
+        "/calculator/arbitrage",
+        headers={"x-api-key": "test-key"},
+        json={
+            "market": "asian_handicap",
+            "line": -0.25,
+            "total_stake": 100000,
+            "legs": [
+                {"selection": "home", "bookmaker": "A", "decimal_odds": 2.20},
+                {"selection": "away", "bookmaker": "B", "decimal_odds": 2.20},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["quarter_line"] is True
+    assert body["push_possible"] is False
+    assert body["is_arbitrage"] is True
+
+
+def test_calculator_rejects_missing_line_for_totals(api_client):
+    resp = api_client.post(
+        "/calculator/arbitrage",
+        headers={"x-api-key": "test-key"},
+        json={
+            "market": "totals",
+            "total_stake": 1000,
+            "legs": [
+                {"selection": "over", "bookmaker": "A", "decimal_odds": 2.10},
+                {"selection": "under", "bookmaker": "B", "decimal_odds": 2.10},
+            ],
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_calculator_rejects_missing_selection(api_client):
+    resp = api_client.post(
+        "/calculator/arbitrage",
+        headers={"x-api-key": "test-key"},
+        json={
+            "market": "moneyline_3way",
+            "total_stake": 1000,
+            "legs": [
+                {"selection": "home", "bookmaker": "A", "decimal_odds": 2.10},
+                {"selection": "away", "bookmaker": "B", "decimal_odds": 2.10},
+            ],
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_calculator_rejects_unknown_market(api_client):
+    resp = api_client.post(
+        "/calculator/arbitrage",
+        headers={"x-api-key": "test-key"},
+        json={
+            "market": "not_a_real_market",
+            "total_stake": 1000,
+            "legs": [{"selection": "home", "bookmaker": "A", "decimal_odds": 2.10}],
+        },
+    )
+    assert resp.status_code == 400

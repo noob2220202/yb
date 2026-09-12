@@ -329,13 +329,19 @@ class StakePlan:
     push_possible: bool
 
 
-def allocate_stakes(result: ArbitrageResult, total_stake: float) -> StakePlan:
+def allocate_stakes(result: ArbitrageResult, total_stake: float, allow_negative: bool = False) -> StakePlan:
     """Split ``total_stake`` across every leg so every outcome pays out the
     same guaranteed profit.
+
+    ``allow_negative=True`` skips the "must actually be an arbitrage"
+    guard and returns the plan anyway (with a negative
+    ``guaranteed_profit``) — used by the manual what-if calculator, where
+    showing "this combination guarantees a LOSS of X%" is itself the
+    useful answer, not an error.
     """
     if total_stake <= 0:
         raise ValueError("total_stake must be positive")
-    if not result.is_arbitrage:
+    if not allow_negative and not result.is_arbitrage:
         raise ValueError("not an arbitrage: total implied probability >= 1.0")
 
     s = result.total_implied_probability

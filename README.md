@@ -224,6 +224,14 @@ docker-compose.yml    postgres + backend + frontend (선택사항 — 로컬은 
 확정픽이 새로 뜰 때마다 OS 알림 + 소리(사인파 차임, 별도 음원 파일 불필요)로 알려줍니다.
 임계값은 브라우저 `localStorage`에 저장됩니다.
 
+맨 아래 **"수동 계산기"** 섹션은 스캐너/DB와 완전히 별개로 동작합니다 — 직접 여러
+북메이커 사이트를 보고 찾은 배당을 마켓별로 입력하면(승무패/승패/오버언더/아시안
+핸디캡(쿼터 라인 포함)/BTTS), 백엔드의 `POST /calculator/arbitrage`가 실제 아비트리지
+엔진(`app/engine/arbitrage.py`)을 그대로 재사용해서 확정 수익 여부와 각 선택지에
+정확히 얼마씩 걸어야 하는지 계산해 돌려줍니다. 확정 수익이 아닌 조합을 넣어도 에러가
+아니라 "이 배당대로 걸면 얼마 손실"이라고 그대로 보여줍니다 — 틀린 조합을 걸지
+않도록 막아주는 것도 이 계산기의 목적입니다.
+
 ### Why the math is split into two engines
 
 `app/engine/arbitrage.py` only ever combines **the same market, the same
@@ -399,9 +407,12 @@ Pinnacle @ 4.72  (모델 엣지 +35.0%)
 ## Current scope / what's next
 
 Shipped: core-market arbitrage (1X2, 2-way moneyline, totals, Asian
-handicap incl. quarter lines, BTTS), push-aware math, stake calculator,
-value-edge model (exotic markets + same-book cross-line consistency —
-works with just Pinnacle), API-key auth, live pick-box dashboard,
+handicap incl. quarter lines, BTTS), push-aware math, stake calculator
+(both auto, from scanner-detected opportunities, and manual — type in any
+odds you found yourself via `POST /calculator/arbitrage` / the "수동
+계산기" dashboard section), value-edge model (exotic markets + same-book
+cross-line consistency — works with just Pinnacle), API-key auth, live
+pick-box dashboard,
 신규 확정픽 브라우저 알림(+소리), 확정픽/가치엣지 각각 별도 채널의
 텔레그램 서버 사이드 알림, 크로스 프로바이더 아비트리지 병합,
 dummy-data-free (설정 안 하면 빈 화면). 다폴더(파레이)는 의도적으로 없음 — 위
