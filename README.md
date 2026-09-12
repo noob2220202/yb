@@ -181,21 +181,39 @@ docker-compose reads) once you have real accounts.
 
 ## Connecting real odds
 
-- **Pinnacle**: requires a Pinnacle account with API access approved and
-  their terms accepted. See https://pinnacleapi.github.io/ for current
-  endpoint docs — `app/providers/pinnacle.py` documents the response shape
-  it expects. Two separate things are true about this adapter: (1) it has
-  never been checked against a real, credentialed Pinnacle response (no
-  approved account was available while building this) — the field names
-  are a best-effort mapping from public docs, so **the first thing to do
-  once you have an account is diff a real `/v3/odds` response against
-  `_parse_period`** and adjust if it doesn't match; (2) regardless of
-  whether the shape is exactly right, the parser is defensive at every
-  nesting level (payload/league/event/period/row) — a malformed or
-  differently-shaped item is skipped rather than raising, and this is
-  covered by tests that specifically feed it broken shapes
-  (`tests/test_providers.py`), so a schema mismatch degrades to "fewer
-  quotes" instead of crashing the poll.
+- **Pinnacle**: **public API access has been closed since July 23rd,
+  2025** — an existing account/password is not enough anymore; new access
+  requires emailing api@pinnacle.com. This adapter is built against the
+  official OpenAPI schema at
+  https://github.com/pinnacleapi/pinnacleapi-documentation (specifically
+  `openapi-specification/linesapi-oas.yaml`), not guessed — but it has
+  still never been exercised against a real, authenticated response
+  (Pinnacle also blocks requests from a long list of jurisdictions with
+  HTTP 451, which is as far as this project got). Two things worth
+  knowing about how it actually works:
+  - **Two calls, joined by event id.** `GET /v2/odds` returns only
+    numeric event ids and the actual prices — no team names or start
+    times at all. Those come from a separate `GET /v1/fixtures` call
+    (note: its top-level key is the *singular* `league`, while odds uses
+    *plural* `leagues` — an easy mismatch to introduce by hand). The
+    adapter fetches both per sport and joins them; an odds event with no
+    matching fixture is dropped rather than guessed at.
+  - **Fair-use rate limits are enforced in code, not just documented.**
+    Pinnacle limits `/odds` (and `/fixtures`) to 1 request per 2 minutes
+    per sportId, and `/sports` to once per hour. `PinnacleProvider`
+    tracks this itself and reuses the last successful result when called
+    again too soon — so a short `POLL_INTERVAL_SECONDS` can never get an
+    account throttled or suspended regardless of how this project is
+    configured.
+  - The parser is still defensive at every nesting level (payload,
+    league, event, period, individual row) — a malformed or
+    differently-shaped item is skipped rather than raising. Both this and
+    the fixtures/odds join are covered by tests
+    (`tests/test_providers.py`, including `httpx.MockTransport`
+    integration tests of the whole fetch flow), so a schema mismatch
+    degrades to "fewer quotes" instead of crashing the poll — but "covered
+    by tests against the documented schema" is not the same claim as
+    "confirmed against live data."
 - **The Odds API** (https://the-odds-api.com): a paid aggregator that
   returns real prices from many independent bookmakers in one call — this
   is what makes genuine cross-bookmaker arbitrage possible. Set
