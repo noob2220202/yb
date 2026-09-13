@@ -1,28 +1,30 @@
-"""Orchestrates one poll cycle: persist incoming odds, then run both the
-guaranteed-profit arbitrage scan (core markets) and the scoreline
-value-edge scan (exotic markets) over them.
+"""Odds ingestion + the match browser's read queries.
+
+Persists every incoming provider quote as an append-only snapshot (odds
+history, replayable/auditable), and answers "what are the latest odds
+for upcoming matches" for the hedge-box builder UI. No automatic
+opportunity detection lives here any more -- picking which two
+selections to hedge is a manual, per-match admin decision now (see
+app/engine/hedgebox.py).
 """
 
 from __future__ import annotations
 
-import json
-import logging
 from collections import defaultdict
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import MarketType
 from app.core.schemas import NormalizedEvent, OddsQuote
-from app.db.models import ArbitrageOpportunity, Bookmaker, Event, OddsSnapshot, ValueEdge
-from app.engine import scoreline_model
-from app.engine.arbitrage import find_arbitrage, is_quarter_line
+from app.db.models import Bookmaker, Event, OddsSnapshot
 
-logger = logging.getLogger(__name__)
-
-MIN_VALUE_EDGE_PERCENT = 2.0
-PREFERRED_TOTALS_LINE = 2.5
+# How far back a snapshot may be and still count as "current" for the
+# match browser -- stale enough to suggest the provider stopped quoting
+# this selection, so better to omit it than show a live-looking price
+# that's actually hours old.
+MAX_SNAPSHOT_AGE = timedelta(minutes=30)
 
 
 async def get_or_create_event(session: AsyncSession, normalized: NormalizedEvent) -> Event:
@@ -72,206 +74,71 @@ async def store_quotes(session: AsyncSession, quotes: list[OddsQuote], source: s
     await session.commit()
 
 
-def group_by_market(quotes: list[OddsQuote]) -> dict[tuple[str, MarketType, float | None], list[OddsQuote]]:
-    groups: dict[tuple[str, MarketType, float | None], list[OddsQuote]] = defaultdict(list)
-    for q in quotes:
-        groups[q.market_key].append(q)
-    return groups
+async def get_upcoming_events(
+    session: AsyncSession,
+    hours_ahead: float = 72.0,
+    sport: str | None = None,
+) -> list[Event]:
+    """Matches from just-started (a bit of slack for in-play) through the
+    lookahead window, soonest first."""
+    now = datetime.now(timezone.utc)
+    stmt = (
+        select(Event)
+        .where(Event.commence_time >= now - timedelta(hours=3))
+        .where(Event.commence_time <= now + timedelta(hours=hours_ahead))
+        .order_by(Event.commence_time.asc())
+    )
+    if sport:
+        stmt = stmt.where(Event.sport == sport)
+    return list((await session.execute(stmt)).scalars().all())
 
 
-def group_by_event(quotes: list[OddsQuote]) -> dict[str, list[OddsQuote]]:
-    groups: dict[str, list[OddsQuote]] = defaultdict(list)
-    for q in quotes:
-        groups[q.event.event_key].append(q)
-    return groups
+@dataclass(frozen=True)
+class LatestQuote:
+    market: str
+    line: float | None
+    selection: str
+    decimal_odds: float
+    bookmaker: str
+    fetched_at: datetime
 
 
-async def scan_arbitrage(session: AsyncSession, quotes: list[OddsQuote]) -> list[ArbitrageOpportunity]:
-    """Groups quotes by (event, market, line) and persists every genuine,
-    guaranteed-profit arbitrage found."""
-    opportunities: list[ArbitrageOpportunity] = []
-    for (event_key, market, _line), group in group_by_market(quotes).items():
-        if market.is_exotic:
-            continue  # exotic markets go through scan_value_edges instead
-        try:
-            result = find_arbitrage(group)
-        except Exception:
-            logger.exception("find_arbitrage failed for event=%s market=%s", event_key, market)
-            continue
-        if result is None or not result.is_arbitrage:
-            continue
-
-        event_result = await session.execute(select(Event).where(Event.event_key == event_key))
-        event = event_result.scalar_one_or_none()
-        if event is None:
-            continue
-
-        legs_json = json.dumps(
-            [{"selection": leg.selection, "bookmaker": leg.bookmaker, "decimal_odds": leg.decimal_odds} for leg in result.legs]
-        )
-        opportunity = ArbitrageOpportunity(
-            event_id=event.id,
-            market=result.market.value,
-            line=result.line,
-            total_implied_probability=result.total_implied_probability,
-            margin_percent=result.margin_percent,
-            push_possible=result.push_possible,
-            legs_json=legs_json,
-            stake_fractions_json=json.dumps(result.stake_fractions) if result.stake_fractions is not None else None,
-            detected_at=datetime.now(timezone.utc),
-        )
-        session.add(opportunity)
-        opportunities.append(opportunity)
-
-    await session.commit()
-    return opportunities
-
-
-def _pick_calibration_inputs(
-    quotes: list[OddsQuote],
-) -> tuple[float, float, float, float, float, float] | None:
-    """Finds a devigging-ready 1X2 + Totals price set to calibrate the
-    scoreline model against, from whichever bookmaker has both. Returns
-    (home_odds, draw_odds, away_odds, totals_line, over_odds, under_odds).
+async def get_latest_quotes_by_event(
+    session: AsyncSession, event_ids: list[int]
+) -> dict[int, list[LatestQuote]]:
+    """The newest snapshot per (event, market, line, selection), for
+    events in ``event_ids`` -- reduced in Python rather than a NULL-
+    tricky SQL self-join, since ``line`` is NULL for most markets and
+    the snapshot volume for a bounded set of upcoming events is small.
     """
-    by_book_ml: dict[str, dict[str, float]] = defaultdict(dict)
-    by_book_totals: dict[str, dict[float, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
+    if not event_ids:
+        return {}
 
-    for q in quotes:
-        if q.market == MarketType.MONEYLINE_3WAY:
-            by_book_ml[q.bookmaker][q.selection] = q.decimal_odds
-        elif q.market == MarketType.TOTALS and q.line is not None:
-            by_book_totals[q.bookmaker][q.line][q.selection] = q.decimal_odds
+    cutoff = datetime.now(timezone.utc) - MAX_SNAPSHOT_AGE
+    stmt = (
+        select(OddsSnapshot, Bookmaker.name)
+        .join(Bookmaker, OddsSnapshot.bookmaker_id == Bookmaker.id)
+        .where(OddsSnapshot.event_id.in_(event_ids))
+        .where(OddsSnapshot.fetched_at >= cutoff)
+        .order_by(OddsSnapshot.fetched_at.desc())
+    )
+    rows = (await session.execute(stmt)).all()
 
-    for book, ml in by_book_ml.items():
-        if not {"home", "draw", "away"}.issubset(ml.keys()):
-            continue
-        totals_for_book = by_book_totals.get(book, {})
-        line = PREFERRED_TOTALS_LINE if PREFERRED_TOTALS_LINE in totals_for_book else next(iter(totals_for_book), None)
-        if line is None:
-            continue
-        totals = totals_for_book[line]
-        if not {"over", "under"}.issubset(totals.keys()):
-            continue
-        return ml["home"], ml["draw"], ml["away"], line, totals["over"], totals["under"]
-    return None
-
-
-async def scan_value_edges(session: AsyncSession, quotes: list[OddsQuote]) -> list[ValueEdge]:
-    """Per event: calibrate the scoreline model from 1X2 + Totals, then
-    flag two kinds of divergence from the model's own view:
-
-    1. Exotic markets (correct score / winning margin) priced by any
-       provider — needs a book that quotes those.
-    2. Any book's OTHER Totals/Asian-Handicap lines on the same match —
-       needs nothing but a book that quotes more than one line per match
-       (Pinnacle always does). With only one provider configured, every
-       quote compared is necessarily that same book's own price, so this
-       becomes a same-book internal-consistency check for free — the one
-       signal that still works with only a single provider.
-
-    Skipped for events without enough core-market data to calibrate.
-    """
-    edges: list[ValueEdge] = []
-
-    for event_key, event_quotes in group_by_event(quotes).items():
-        calibration_inputs = _pick_calibration_inputs(event_quotes)
-        if calibration_inputs is None:
-            continue
-
-        correct_score_quotes = [
-            (q.bookmaker, q.selection, q.decimal_odds) for q in event_quotes if q.market == MarketType.CORRECT_SCORE
-        ]
-        margin_quotes = [
-            (q.bookmaker, q.selection, q.decimal_odds) for q in event_quotes if q.market == MarketType.WINNING_MARGIN
-        ]
-        # Quarter lines (.25/.75) are excluded here: scoreline_model's
-        # totals_probabilities/handicap_probabilities only know binary
-        # win/push/lose, which mis-prices a quarter line's real 3-bucket
-        # settlement (decisive win / marginal half win-or-loss / decisive
-        # loss — see app/engine/arbitrage.py's module docstring). The
-        # arbitrage engine models quarter lines correctly on its own; this
-        # value-edge path just skips them rather than silently guessing.
-        totals_quotes = [
-            (q.bookmaker, q.line, q.selection, q.decimal_odds)
-            for q in event_quotes
-            if q.market == MarketType.TOTALS and q.line is not None and not is_quarter_line(q.market, q.line)
-        ]
-        handicap_quotes = [
-            (q.bookmaker, q.line, q.selection, q.decimal_odds)
-            for q in event_quotes
-            if q.market == MarketType.ASIAN_HANDICAP and q.line is not None and not is_quarter_line(q.market, q.line)
-        ]
-
-        try:
-            calibrated = scoreline_model.calibrate(*calibration_inputs)
-            calibration_totals_line = calibration_inputs[3]
-
-            exotic_found = scoreline_model.find_value_edges(
-                calibrated.matrix, correct_score_quotes, margin_quotes, min_edge_percent=MIN_VALUE_EDGE_PERCENT
+    seen: set[tuple[int, str, float | None, str]] = set()
+    by_event: dict[int, list[LatestQuote]] = defaultdict(list)
+    for snapshot, bookmaker_name in rows:
+        key = (snapshot.event_id, snapshot.market, snapshot.line, snapshot.selection)
+        if key in seen:
+            continue  # already saw a more recent snapshot for this exact key (rows are newest-first)
+        seen.add(key)
+        by_event[snapshot.event_id].append(
+            LatestQuote(
+                market=snapshot.market,
+                line=snapshot.line,
+                selection=snapshot.selection,
+                decimal_odds=snapshot.decimal_odds,
+                bookmaker=bookmaker_name,
+                fetched_at=snapshot.fetched_at,
             )
-            cross_line_found = scoreline_model.find_cross_line_edges(
-                calibrated.matrix,
-                totals_quotes,
-                handicap_quotes,
-                calibration_totals_line=calibration_totals_line,
-                min_edge_percent=MIN_VALUE_EDGE_PERCENT,
-            )
-        except Exception:
-            # One event's odds being weird enough to break calibration (or
-            # a future scipy/numerical edge case) must never cost every
-            # OTHER event's value edges in this cycle.
-            logger.exception("scoreline model failed for event=%s", event_key)
-            continue
-        if not exotic_found and not cross_line_found:
-            continue
-
-        event_result = await session.execute(select(Event).where(Event.event_key == event_key))
-        event = event_result.scalar_one_or_none()
-        if event is None:
-            continue
-
-        for edge in exotic_found:
-            market = MarketType.CORRECT_SCORE if "-" in edge.selection else MarketType.WINNING_MARGIN
-            record = ValueEdge(
-                event_id=event.id,
-                market=market.value,
-                line=None,
-                selection=edge.selection,
-                bookmaker=edge.bookmaker,
-                quoted_decimal_odds=edge.decimal_odds,
-                model_probability=edge.model_probability,
-                implied_probability=edge.implied_probability,
-                edge_percent=edge.edge_percent,
-                detected_at=datetime.now(timezone.utc),
-            )
-            session.add(record)
-            edges.append(record)
-
-        for edge in cross_line_found:
-            record = ValueEdge(
-                event_id=event.id,
-                market=edge.market,
-                line=edge.line,
-                selection=edge.selection,
-                bookmaker=edge.bookmaker,
-                quoted_decimal_odds=edge.decimal_odds,
-                model_probability=edge.model_probability,
-                implied_probability=edge.implied_probability,
-                edge_percent=edge.edge_percent,
-                detected_at=datetime.now(timezone.utc),
-            )
-            session.add(record)
-            edges.append(record)
-
-    await session.commit()
-    return edges
-
-
-async def run_scan_cycle(
-    session: AsyncSession, quotes: list[OddsQuote], source: str
-) -> tuple[list[ArbitrageOpportunity], list[ValueEdge]]:
-    await store_quotes(session, quotes, source)
-    opportunities = await scan_arbitrage(session, quotes)
-    edges = await scan_value_edges(session, quotes)
-    return opportunities, edges
+        )
+    return by_event

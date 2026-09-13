@@ -51,14 +51,6 @@ def empty_api_client(tmp_path):
 
 
 def test_fresh_install_with_no_providers_configured_is_empty_not_fake(empty_api_client):
-    resp = empty_api_client.get("/opportunities", headers={"x-api-key": "empty-key"})
+    resp = empty_api_client.get("/matches", headers={"x-api-key": "empty-key"})
     assert resp.status_code == 200
     assert resp.json() == []
-
-    resp = empty_api_client.get("/value-edges", headers={"x-api-key": "empty-key"})
-    assert resp.status_code == 200
-    assert resp.json() == []
-
-    resp = empty_api_client.post("/admin/poll", headers={"x-api-key": "empty-key"})
-    assert resp.status_code == 200
-    assert resp.json() == {"opportunities_found": 0, "value_edges_found": 0}

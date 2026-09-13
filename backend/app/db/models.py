@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -40,7 +40,7 @@ class OddsSnapshot(Base):
     """One priced selection observed at one point in time.
 
     Kept append-only so odds movement can be replayed/audited later; the
-    scanner only ever looks at the latest snapshot per
+    match browser only ever looks at the latest snapshot per
     (event, bookmaker, market, line, selection).
     """
 
@@ -63,62 +63,33 @@ class OddsSnapshot(Base):
     )
 
 
-class ArbitrageOpportunity(Base):
-    """A guaranteed-profit combination the scanner detected, snapshotted at
-    the moment of detection (odds can move a few seconds later)."""
-
-    __tablename__ = "arbitrage_opportunities"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), index=True)
-    market: Mapped[str] = mapped_column(String(32))
-    line: Mapped[float | None] = mapped_column(Float, nullable=True)
-    total_implied_probability: Mapped[float] = mapped_column(Float)
-    margin_percent: Mapped[float] = mapped_column(Float)
-    push_possible: Mapped[bool] = mapped_column(Boolean, default=False)
-    legs_json: Mapped[str] = mapped_column(Text)  # JSON list of {selection, bookmaker, decimal_odds}
-    # JSON {selection: stake_fraction} — only set for quarter-line (.25/.75)
-    # Asian Handicap/Totals opportunities, whose correct stake split isn't
-    # the naive 1/odds-proportional one (see app/engine/arbitrage.py). Null
-    # for every other market/line, which fall back to that naive split.
-    stake_fractions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-
-    event: Mapped[Event] = relationship()
-
-
-class ValueEdge(Base):
-    """A model-vs-market probability mismatch — either on an exotic market
-    (correct score, winning margin) priced by any provider, or a same-
-    bookmaker cross-line mismatch (e.g. Pinnacle's own Totals 1.5 price
-    disagreeing with what its Totals-2.5-calibrated model implies). NOT a
-    guaranteed-profit signal either way — see
-    app/engine/scoreline_model.py docstring.
+class SentHedgeBox(Base):
+    """A record of every hedge box actually sent to Telegram -- doubles as
+    the auto-incrementing box number shown to channel members and the
+    backing data for the public "박스 상세보기" link a box's Telegram
+    button points to.
     """
 
-    __tablename__ = "value_edges"
+    __tablename__ = "sent_hedge_boxes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), index=True)
-    market: Mapped[str] = mapped_column(String(32))
-    line: Mapped[float | None] = mapped_column(Float, nullable=True)
-    selection: Mapped[str] = mapped_column(String(32))
-    bookmaker: Mapped[str] = mapped_column(String(64))
-    quoted_decimal_odds: Mapped[float] = mapped_column(Float)
-    model_probability: Mapped[float] = mapped_column(Float)
-    implied_probability: Mapped[float] = mapped_column(Float)
-    edge_percent: Mapped[float] = mapped_column(Float)
-    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
-    event: Mapped[Event] = relationship()
+    event: Mapped[str] = mapped_column(String(200))
+    league: Mapped[str] = mapped_column(String(128), default="")
+    commence_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
+    leg_a_label: Mapped[str] = mapped_column(String(80))
+    leg_a_odds: Mapped[float] = mapped_column(Float)
+    leg_a_stake: Mapped[float] = mapped_column(Float)
 
-class User(Base):
-    __tablename__ = "users"
+    leg_b_label: Mapped[str] = mapped_column(String(80))
+    leg_b_odds: Mapped[float] = mapped_column(Float)
+    leg_b_stake: Mapped[float] = mapped_column(Float)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    api_key_hash: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    plan: Mapped[str] = mapped_column(String(32), default="trial")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    total_stake: Mapped[float] = mapped_column(Float)
+    guaranteed_profit: Mapped[float] = mapped_column(Float)
+    profit_percent: Mapped[float] = mapped_column(Float)
+    implied_hit_rate_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    message_text: Mapped[str] = mapped_column(Text)

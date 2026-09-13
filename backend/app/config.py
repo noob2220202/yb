@@ -23,8 +23,16 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    telegram_min_margin_percent: float = 1.0
-    telegram_min_edge_percent: float = 3.0
+
+    # Base URL of the deployed frontend, used to build the "박스 상세보기"
+    # link a sent box's Telegram button points to. Must be reachable by
+    # whoever reads the channel -- update to the real public host/IP in
+    # production .env.
+    public_frontend_url: str = "http://localhost:7000"
+
+    # Default stake rounding step (KRW) for the hedge-box calculator --
+    # overridable per-request via HedgeBoxCalculateRequest.stake_round_to.
+    hedge_box_default_stake_round: float = 100.0
 
     @property
     def poll_sports_list(self) -> list[str]:
