@@ -47,6 +47,7 @@ export interface ScanLegInput {
 export interface ScanRequest {
   total_stake: number;
   legs: ScanLegInput[];
+  min_hit_rate_percent?: number | null;
 }
 
 export interface ScanGroupResult {
@@ -63,6 +64,24 @@ export interface ScanGroupResult {
   profit_percent: number;
   legs: StakeLeg[];
   warning: string | null;
+}
+
+export interface HitRatePick {
+  market: string;
+  market_label: string;
+  line: number | null;
+  target_hit_rate_percent: number;
+  achieved_hit_rate_percent: number;
+  margin_percent: number;
+  guaranteed_profit: number;
+  profit_percent: number;
+  excluded_selections: string[];
+  legs: StakeLeg[];
+}
+
+export interface ScanResponse {
+  groups: ScanGroupResult[];
+  hit_rate_picks: HitRatePick[];
 }
 
 export interface ValueEdge {
@@ -104,7 +123,7 @@ export function fetchStakePlan(opportunityId: number, totalStake: number): Promi
   return apiFetch<StakePlan>(`/opportunities/${opportunityId}/stake-plan?total_stake=${totalStake}`);
 }
 
-export async function scanManualOdds(req: ScanRequest): Promise<ScanGroupResult[]> {
+export async function scanManualOdds(req: ScanRequest): Promise<ScanResponse> {
   const res = await fetch(`${API_BASE_URL}/calculator/scan`, {
     method: "POST",
     headers: { "x-api-key": API_KEY, "content-type": "application/json" },
@@ -121,5 +140,5 @@ export async function scanManualOdds(req: ScanRequest): Promise<ScanGroupResult[
     }
     throw new Error(detail);
   }
-  return res.json() as Promise<ScanGroupResult[]>;
+  return res.json() as Promise<ScanResponse>;
 }

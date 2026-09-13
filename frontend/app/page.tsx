@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  HitRatePick,
   Opportunity,
   ScanGroupResult,
   ScanLegInput,
+  ScanResponse,
   StakePlan,
   ValueEdge,
   fetchOpportunities,
@@ -306,7 +308,8 @@ export default function Page() {
 function ManualCalculator() {
   const [rows, setRows] = useState<ScanRowState[]>(() => [makeScanRow(), makeScanRow()]);
   const [totalStake, setTotalStake] = useState(100000);
-  const [results, setResults] = useState<ScanGroupResult[] | null>(null);
+  const [minHitRate, setMinHitRate] = useState("");
+  const [results, setResults] = useState<ScanResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -373,9 +376,23 @@ function ManualCalculator() {
       return;
     }
 
+    let minHitRatePercent: number | null = null;
+    if (minHitRate.trim() !== "") {
+      const parsed = Number(minHitRate);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+        setErrorMsg("목표 적중률은 0~100 사이 숫자여야 합니다.");
+        return;
+      }
+      minHitRatePercent = parsed;
+    }
+
     setLoading(true);
     try {
-      const res = await scanManualOdds({ total_stake: totalStake, legs });
+      const res = await scanManualOdds({
+        total_stake: totalStake,
+        legs,
+        ...(minHitRatePercent !== null ? { min_hit_rate_percent: minHitRatePercent } : {}),
+      });
       setResults(res);
     } catch (err) {
       setErrorMsg((err as Error).message);
@@ -497,6 +514,18 @@ function ManualCalculator() {
               onChange={(e) => setTotalStake(Number(e.target.value))}
             />
           </label>
+          <label className="calc-field">
+            <span>목표 적중률 % (선택)</span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              placeholder="예: 70"
+              value={minHitRate}
+              onChange={(e) => setMinHitRate(e.target.value)}
+            />
+          </label>
           <button className="btn" onClick={scan} disabled={loading}>
             {loading ? "계산 중…" : "확정 수익 찾기"}
           </button>
@@ -507,13 +536,32 @@ function ManualCalculator() {
 
       {results !== null && (
         <div className="scan-results">
-          {results.length === 0 ? (
+          {results.groups.length === 0 ? (
             <div className="empty">계산할 그룹이 없어요 — 같은 마켓·라인에 최소 2개 이상 입력하세요.</div>
           ) : (
             <div className="pick-grid">
-              {results.map((group, i) => (
+              {results.groups.map((group, i) => (
                 <ScanResultBox key={`${group.market}-${group.line}-${i}`} group={group} />
               ))}
+            </div>
+          )}
+
+          {results.hit_rate_picks.length > 0 && (
+            <div className="hit-rate-section">
+              <div className="section-head">
+                <h2>적중률 목표 픽 (부분 커버 — 확정 수익 아님)</h2>
+              </div>
+              <p className="hint">
+                아래는 일부러 선택지 일부를 빼고, 남은 선택지들의 공정 확률 합이 목표
+                적중률 이상일 때 마진이 가장 큰 조합입니다. <strong>제외된 선택지 결과가
+                나오면 이 조합 전체를 잃습니다</strong> — 위 확정 수익 카드와는 완전히
+                다른 성격이니 헷갈리지 마세요.
+              </p>
+              <div className="pick-grid">
+                {results.hit_rate_picks.map((pick, i) => (
+                  <HitRatePickBox key={`${pick.market}-${pick.line}-${i}`} pick={pick} />
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -595,6 +643,73 @@ function ScanResultBox({ group }: { group: ScanGroupResult }) {
             확정 수익 <strong>{group.guaranteed_profit.toFixed(0)}</strong>
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+function HitRatePickBox({ pick }: { pick: HitRatePick }) {
+  return (
+    <div className="pick-box value-tone">
+      <div className="pick-top">
+        <div>
+          <div className="pick-event">{pick.market_label}</div>
+          <div className="pick-meta">
+            <span>적중률 {pick.achieved_hit_rate_percent.toFixed(1)}% (목표 {pick.target_hit_rate_percent.toFixed(0)}%)</span>
+          </div>
+        </div>
+        <div className="pick-margin">
+          <div className="num small">
+            {pick.margin_percent >= 0 ? "+" : ""}
+            {pick.margin_percent.toFixed(2)}%
+          </div>
+          <div className="cap">부분 커버 마진</div>
+        </div>
+      </div>
+
+      <div className="legs-strip">
+        {pick.legs.map((leg, i) => (
+          <span className="leg-chip" key={`${leg.selection}-${leg.bookmaker}-${i}`}>
+            <span className="sel">{leg.selection}</span>
+            <span className="book">{leg.bookmaker}</span>
+            <span className="odds">{leg.decimal_odds.toFixed(2)}</span>
+          </span>
+        ))}
+      </div>
+
+      <p className="hint scan-warning">
+        제외: <strong>{pick.excluded_selections.join(", ")}</strong> — 이 결과가 나오면 아래
+        베팅액 전부를 잃습니다.
+      </p>
+
+      <table className="stake-table">
+        <thead>
+          <tr>
+            <th>선택</th>
+            <th>북메이커</th>
+            <th>배당</th>
+            <th>베팅액</th>
+            <th>환급액</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pick.legs.map((leg, i) => (
+            <tr key={`${leg.selection}-${leg.bookmaker}-row-${i}`}>
+              <td>{leg.selection}</td>
+              <td>{leg.bookmaker}</td>
+              <td>{leg.decimal_odds.toFixed(2)}</td>
+              <td>{leg.stake.toFixed(0)}</td>
+              <td>{leg.payout.toFixed(0)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div className="pick-actions">
+        <span className="badge not-guaranteed">확정 아님 · 부분 커버</span>
+        <span className="scan-profit">
+          적중 시 수익 <strong>{pick.guaranteed_profit.toFixed(0)}</strong>
+        </span>
       </div>
     </div>
   );

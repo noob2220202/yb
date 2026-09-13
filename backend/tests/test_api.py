@@ -159,7 +159,7 @@ def test_scan_finds_verified_arbitrage_among_a_mixed_pool(api_client):
         },
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["groups"]
 
     ml = next(g for g in body if g["market"] == "moneyline_2way")
     assert ml["verified"] is True
@@ -191,7 +191,7 @@ def test_scan_handles_quarter_line_asian_handicap(api_client):
         },
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["groups"]
     assert len(body) == 1
     assert body[0]["quarter_line"] is True
     assert body[0]["push_possible"] is False
@@ -213,7 +213,7 @@ def test_scan_verifies_european_handicap_as_a_3way_clean_partition(api_client):
         },
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["groups"]
     assert len(body) == 1
     assert body[0]["verified"] is True
     assert body[0]["is_arbitrage"] is True
@@ -233,7 +233,7 @@ def test_scan_marks_missing_selection_as_unverified_with_a_warning(api_client):
         },
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["groups"]
     assert len(body) == 1
     assert body[0]["verified"] is False
     assert "선택지" in body[0]["warning"]
@@ -258,7 +258,7 @@ def test_scan_group_field_mixes_different_markets_and_marks_unverified(api_clien
         },
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["groups"]
     assert len(body) == 1
     assert body[0]["verified"] is False
     assert "독립이 아니" in body[0]["warning"]
@@ -280,8 +280,84 @@ def test_scan_marks_correct_score_and_custom_markets_as_unverified(api_client):
         },
     )
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["groups"]
     labels = {g["market"] for g in body}
     assert labels == {"correct_score", "코너킥 오버 9.5"}
     assert all(g["verified"] is False for g in body)
     assert all("경우의 수" in g["warning"] for g in body)
+
+
+# ---------------------------------------------------------------------
+# min_hit_rate_percent: partial-coverage picks (drop the least likely
+# outcome to raise margin, at the cost of a real chance of losing it all).
+# ---------------------------------------------------------------------
+
+
+def test_scan_hit_rate_drops_the_draw_to_raise_margin(api_client):
+    """Classic case: a 3-way market isn't a full arbitrage, but skipping
+    the draw (lowest fair probability here) to hedge only home/away can
+    clear a lower hit-rate target with a better margin -- and must show
+    up in its own hit_rate_picks list, separate from `groups`."""
+    resp = api_client.post(
+        "/calculator/scan",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 100000,
+            "min_hit_rate_percent": 70,
+            "legs": [
+                {"market": "moneyline_3way", "selection": "home", "bookmaker": "A", "decimal_odds": 2.05},
+                {"market": "moneyline_3way", "selection": "draw", "bookmaker": "B", "decimal_odds": 3.40},
+                {"market": "moneyline_3way", "selection": "away", "bookmaker": "C", "decimal_odds": 4.20},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["hit_rate_picks"], "expected at least one hit-rate pick"
+    pick = body["hit_rate_picks"][0]
+    assert pick["market"] == "moneyline_3way"
+    assert pick["achieved_hit_rate_percent"] >= 70.0 - 1e-6
+    assert pick["target_hit_rate_percent"] == 70.0
+    assert "draw" in pick["excluded_selections"]
+    assert {leg["selection"] for leg in pick["legs"]} == {"home", "away"}
+
+    # The full 3-way group is still reported too, in the separate list,
+    # and its margin must never exceed the partial pick's (dropping an
+    # outcome can only ever raise or match the margin).
+    full_group = next(g for g in body["groups"] if g["market"] == "moneyline_3way")
+    assert pick["margin_percent"] >= full_group["margin_percent"] - 1e-9
+
+
+def test_scan_hit_rate_omitted_by_default(api_client):
+    resp = api_client.post(
+        "/calculator/scan",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 1000,
+            "legs": [
+                {"market": "moneyline_2way", "selection": "home", "bookmaker": "A", "decimal_odds": 1.80},
+                {"market": "moneyline_2way", "selection": "away", "bookmaker": "B", "decimal_odds": 1.80},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["hit_rate_picks"] == []
+
+
+def test_scan_hit_rate_never_computed_for_unverified_groups(api_client):
+    """correct_score has no reliable 'everything else' probability, so it
+    must never produce a hit-rate pick even when a threshold is set."""
+    resp = api_client.post(
+        "/calculator/scan",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 1000,
+            "min_hit_rate_percent": 50,
+            "legs": [
+                {"market": "correct_score", "selection": "2-1", "bookmaker": "A", "decimal_odds": 8.0},
+                {"market": "correct_score", "selection": "1-0", "bookmaker": "A", "decimal_odds": 7.0},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["hit_rate_picks"] == []

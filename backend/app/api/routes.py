@@ -1,3 +1,4 @@
+import itertools
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -8,10 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import require_api_key
 from app.api.schemas import (
+    HitRatePickResult,
     LegOut,
     OpportunityOut,
     ScanGroupResult,
     ScanRequest,
+    ScanResponse,
     StakeLegOut,
     StakePlanOut,
     ValueEdgeOut,
@@ -58,6 +61,49 @@ def _market_label(market_str: str, line: float | None) -> str:
     except ValueError:
         label = market_str
     return f"{label} ({line})" if line is not None else label
+
+
+def _devig_proportional(odds_by_selection: dict[str, float]) -> dict[str, float]:
+    """Proportional (multiplicative) devig: turns each selection's best
+    available decimal odds into a no-vig fair probability, summing to 1
+    across the FULL set passed in. Only meaningful when that full set is
+    genuinely the complete, mutually-exclusive outcome space -- which is
+    exactly why callers only use this for a verified clean-partition
+    market group, never an open-ended one like correct score."""
+    implied = {selection: 1.0 / odds for selection, odds in odds_by_selection.items()}
+    total = sum(implied.values())
+    return {selection: p / total for selection, p in implied.items()}
+
+
+def _best_hit_rate_subset(
+    odds_by_selection: dict[str, float],
+    fair_by_selection: dict[str, float],
+    target_hit_rate_percent: float,
+) -> tuple[frozenset[str], float, float] | None:
+    """Brute-forces every non-empty subset of selections (at most 2^3-1=7
+    for this project's clean-partition markets, all 2- or 3-way) and
+    returns the one with the lowest sum(1/odds) -- i.e. the highest
+    margin -- among subsets whose combined fair probability clears the
+    target. A smaller subset always has a lower (or equal) sum(1/odds)
+    than a bigger one since every term is positive, so the full set
+    (everything covered, hit rate 100%) is always the worst-margin
+    candidate here -- that's the whole point of allowing a lower target.
+    Returns (subset, achieved_hit_rate_fraction, total_implied_probability),
+    or None if nothing clears the target.
+    """
+    selections = list(odds_by_selection.keys())
+    target = target_hit_rate_percent / 100.0
+    best: tuple[frozenset[str], float, float] | None = None
+    for size in range(1, len(selections) + 1):
+        for combo in itertools.combinations(selections, size):
+            subset = frozenset(combo)
+            hit_rate = sum(fair_by_selection[s] for s in subset)
+            if hit_rate < target - 1e-9:
+                continue
+            total_implied = sum(1.0 / odds_by_selection[s] for s in subset)
+            if best is None or total_implied < best[2]:
+                best = (subset, hit_rate, total_implied)
+    return best
 
 
 @router.get("/health")
@@ -150,10 +196,10 @@ async def stake_plan(
 
 @router.post(
     "/calculator/scan",
-    response_model=list[ScanGroupResult],
+    response_model=ScanResponse,
     dependencies=[Depends(require_api_key)],
 )
-async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
+async def scan_manual_odds(payload: ScanRequest) -> ScanResponse:
     """Manual what-if calculator — no scanner/DB involved. Takes a whole
     POOL of odds across as many markets as you want, all for ONE match
     (moneyline, European 3-way handicap, Asian handicap incl. quarter
@@ -186,6 +232,13 @@ async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
 
     Every case always carries an explanatory ``warning`` except the
     fully engine-verified one.
+
+    If ``payload.min_hit_rate_percent`` is set, ALSO returns
+    ``hit_rate_picks``: for every verified group, the best-margin subset
+    of its outcomes whose combined devigged fair probability clears that
+    target (see ``_best_hit_rate_subset``) — a deliberate partial hedge,
+    never a guarantee, kept in its own list so it's never confused with
+    the guaranteed ``groups`` results.
     """
     groups: dict[str, list] = defaultdict(list)
     for leg in payload.legs:
@@ -193,6 +246,7 @@ async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
         groups[key].append(leg)
 
     results: list[ScanGroupResult] = []
+    hit_rate_picks: list[HitRatePickResult] = []
     for key, group_legs in groups.items():
         market_values = {leg.market for leg in group_legs}
         line_values = {leg.line for leg in group_legs}
@@ -221,6 +275,48 @@ async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
         )
 
         if is_verifiable:
+            if payload.min_hit_rate_percent is not None:
+                best_odds_map: dict[str, tuple[float, str]] = {}
+                for i, leg in enumerate(group_legs):
+                    current = best_odds_map.get(leg.selection)
+                    if current is None or leg.decimal_odds > current[0]:
+                        best_odds_map[leg.selection] = (leg.decimal_odds, leg.bookmaker or f"북메이커{i + 1}")
+                fair = _devig_proportional({sel: odds for sel, (odds, _bk) in best_odds_map.items()})
+                picked = _best_hit_rate_subset(
+                    {sel: odds for sel, (odds, _bk) in best_odds_map.items()}, fair, payload.min_hit_rate_percent
+                )
+                if picked is not None:
+                    subset, achieved_hit_rate, total_implied = picked
+                    hit_margin_percent = (1.0 / total_implied - 1.0) * 100.0
+                    hit_legs_out = []
+                    for sel in subset:
+                        odds, bookmaker = best_odds_map[sel]
+                        fraction = (1.0 / odds) / total_implied
+                        stake = payload.total_stake * fraction
+                        hit_legs_out.append(
+                            StakeLegOut(
+                                selection=sel,
+                                bookmaker=bookmaker,
+                                decimal_odds=odds,
+                                stake=round(stake, 2),
+                                payout=round(stake * odds, 2),
+                            )
+                        )
+                    hit_rate_picks.append(
+                        HitRatePickResult(
+                            market=market_str,
+                            market_label=_market_label(market_str, line),
+                            line=line,
+                            target_hit_rate_percent=payload.min_hit_rate_percent,
+                            achieved_hit_rate_percent=achieved_hit_rate * 100.0,
+                            margin_percent=hit_margin_percent,
+                            guaranteed_profit=round(payload.total_stake * (1.0 / total_implied - 1.0), 2),
+                            profit_percent=hit_margin_percent,
+                            excluded_selections=sorted(set(best_odds_map.keys()) - subset),
+                            legs=hit_legs_out,
+                        )
+                    )
+
             quotes = [
                 OddsQuote(
                     event=_CALCULATOR_EVENT,
@@ -318,7 +414,8 @@ async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
         )
 
     results.sort(key=lambda r: (not r.verified, not r.is_arbitrage, -r.margin_percent))
-    return results
+    hit_rate_picks.sort(key=lambda p: -p.margin_percent)
+    return ScanResponse(groups=results, hit_rate_picks=hit_rate_picks)
 
 
 @router.get("/value-edges", response_model=list[ValueEdgeOut], dependencies=[Depends(require_api_key)])

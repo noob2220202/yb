@@ -67,6 +67,12 @@ class ScanLegIn(BaseModel):
 class ScanRequest(BaseModel):
     total_stake: float = Field(gt=0)
     legs: list[ScanLegIn]
+    # Optional: also look for a partial-coverage pick per eligible market
+    # group -- betting only SOME of a market's outcomes (dropping the
+    # ones you judge least likely) raises the margin at the cost of a
+    # real chance of losing the whole stake if a dropped outcome hits.
+    # See ScanResponse.hit_rate_picks / HitRatePickResult.
+    min_hit_rate_percent: float | None = Field(default=None, ge=0.0, le=100.0)
 
 
 class ScanGroupResult(BaseModel):
@@ -83,6 +89,37 @@ class ScanGroupResult(BaseModel):
     profit_percent: float
     legs: list[StakeLegOut]
     warning: str | None = None
+
+
+class HitRatePickResult(BaseModel):
+    """A deliberately partial hedge: bet only on a SUBSET of one market's
+    outcomes (never all of them -- that's just ``ScanGroupResult``
+    again), chosen to maximize margin subject to the subset's combined
+    fair (devigged) probability meeting ``target_hit_rate_percent``. If
+    the actual result falls in ``excluded_selections`` instead, the whole
+    stake is lost -- this is NOT a guarantee, just the best margin
+    available at that risk level. Only computed for markets whose full
+    outcome set is known (the same clean-partition markets that can be
+    ``verified``) -- an open-ended market like correct score has no
+    reliable "everything else" probability to subtract, so it's never
+    considered here.
+    """
+
+    market: str
+    market_label: str
+    line: float | None
+    target_hit_rate_percent: float
+    achieved_hit_rate_percent: float
+    margin_percent: float
+    guaranteed_profit: float
+    profit_percent: float
+    excluded_selections: list[str]
+    legs: list[StakeLegOut]
+
+
+class ScanResponse(BaseModel):
+    groups: list[ScanGroupResult]
+    hit_rate_picks: list[HitRatePickResult]
 
 
 class ValueEdgeOut(BaseModel):

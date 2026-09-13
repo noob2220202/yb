@@ -631,6 +631,12 @@ section > p.hint {
   margin-top: var(--sp-4);
 }
 
+.hit-rate-section {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-5);
+  border-top: 1px dashed var(--border);
+}
+
 .scan-warning {
   margin: 0 0 var(--sp-3) !important;
 }
