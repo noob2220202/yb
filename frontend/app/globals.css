@@ -536,12 +536,6 @@ section > p.hint {
   gap: var(--sp-4);
 }
 
-.calc-form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-3);
-}
-
 .calc-field {
   display: flex;
   flex-direction: column;
@@ -572,31 +566,128 @@ section > p.hint {
   line-height: 1.5;
 }
 
-/* 여러 마켓을 한 번에 입력하는 행 기반 표 (수동 계산기) */
-.scan-rows {
+/* 마켓별 고정 표 (수동 계산기) — 표처럼 빈칸만 채우면 되는 구조 */
+.market-tables {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
 }
 
-.scan-row {
+.market-table-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.market-table-head h3 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.market-line-input {
+  width: 140px;
+  flex-shrink: 0;
+}
+
+.market-grid-scroll {
+  overflow-x: auto;
+  margin: 0 calc(var(--sp-4) * -1);
+  padding: 0 var(--sp-4);
+}
+
+.market-grid {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 0.9fr 0.9fr 0.9fr 100px 32px;
   gap: var(--sp-2);
   align-items: center;
+  min-width: 320px;
 }
 
-.scan-row select,
-.scan-row input {
+.market-grid-2col {
+  grid-template-columns: 96px repeat(2, minmax(72px, 1fr)) 32px;
+}
+
+.market-grid-3col {
+  grid-template-columns: 88px repeat(3, minmax(64px, 1fr)) 32px;
+}
+
+.market-grid-row {
+  display: contents;
+}
+
+.market-grid-header {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding-bottom: 2px;
+}
+
+.market-grid input,
+.freeform-row input,
+.system-row input {
   background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--text-1);
   border-radius: var(--r-sm);
-  padding: 7px 10px;
+  padding: 7px 8px;
   font-size: 12.5px;
   width: 100%;
   min-width: 0;
   font-variant-numeric: tabular-nums;
+}
+
+.freeform-rows,
+.system-rows {
+  display: grid;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-bottom: var(--sp-3);
+}
+
+.freeform-rows {
+  grid-template-columns: 1fr 1fr 96px 32px;
+}
+
+.system-rows {
+  grid-template-columns: 1.2fr 1fr 0.8fr 1fr 32px;
+}
+
+.system-grid-header-row {
+  display: contents;
+}
+
+.system-grid-header-row span {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.freeform-row,
+.system-row {
+  display: contents;
+}
+
+.system-result {
+  margin-top: var(--sp-4);
+}
+
+@media (max-width: 480px) {
+  .freeform-rows {
+    grid-template-columns: 1fr 1fr 76px 28px;
+  }
+  .system-rows {
+    grid-template-columns: 1fr 0.8fr 0.7fr 0.8fr 28px;
+  }
+  .system-grid-header-row {
+    display: none; /* 좁은 화면에서는 헤더 라벨 대신 placeholder로 충분 */
+  }
 }
 
 .scan-row-remove {
@@ -663,13 +754,8 @@ section > p.hint {
   color: var(--info);
 }
 
-@media (max-width: 640px) {
-  .scan-row {
-    grid-template-columns: 1fr 1fr;
-  }
-  .scan-row-remove {
-    justify-self: end;
-  }
+.pick-margin .num.calc-loss-num {
+  color: var(--danger);
 }
 
 .empty {

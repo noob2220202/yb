@@ -41,7 +41,6 @@ export interface ScanLegInput {
   selection: string;
   bookmaker: string;
   decimal_odds: number;
-  group?: string;
 }
 
 export interface ScanRequest {
@@ -82,6 +81,40 @@ export interface HitRatePick {
 export interface ScanResponse {
   groups: ScanGroupResult[];
   hit_rate_picks: HitRatePick[];
+}
+
+export interface SystemBetLegInput {
+  label: string;
+  bookmaker: string;
+  decimal_odds: number;
+  probability_percent?: number | null;
+}
+
+export interface SystemBetRequest {
+  total_stake: number;
+  min_hit_rate_percent: number;
+  legs: SystemBetLegInput[];
+}
+
+export interface SystemBetBreakdownItem {
+  combo_size: number;
+  count: number;
+}
+
+export interface SystemBetResult {
+  num_selections: number;
+  min_hits: number;
+  achieved_hit_rate_percent: number;
+  num_bets: number;
+  unit_stake: number;
+  total_stake: number;
+  expected_profit: number;
+  expected_profit_percent: number;
+  best_case_profit: number;
+  best_case_profit_percent: number;
+  breakdown: SystemBetBreakdownItem[];
+  used_naive_probability: boolean;
+  warning: string;
 }
 
 export interface ValueEdge {
@@ -141,4 +174,24 @@ export async function scanManualOdds(req: ScanRequest): Promise<ScanResponse> {
     throw new Error(detail);
   }
   return res.json() as Promise<ScanResponse>;
+}
+
+export async function calculateSystemBet(req: SystemBetRequest): Promise<SystemBetResult> {
+  const res = await fetch(`${API_BASE_URL}/calculator/system-bet`, {
+    method: "POST",
+    headers: { "x-api-key": API_KEY, "content-type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    let detail = `요청 실패 (${res.status})`;
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      // 응답이 JSON이 아니면 기본 메시지 사용
+    }
+    throw new Error(detail);
+  }
+  return res.json() as Promise<SystemBetResult>;
 }

@@ -17,6 +17,9 @@ from app.api.schemas import (
     ScanResponse,
     StakeLegOut,
     StakePlanOut,
+    SystemBetBreakdownItem,
+    SystemBetOut,
+    SystemBetRequest,
     ValueEdgeOut,
 )
 from app.core.enums import MarketType, Sport
@@ -31,6 +34,13 @@ from app.engine.arbitrage import (
     find_arbitrage,
     is_quarter_line,
     is_supported_line,
+)
+from app.engine.systembet import (
+    MAX_LEGS,
+    SystemLeg,
+    build_system_bet,
+    poisson_binomial_at_least,
+    smallest_min_hits_for_target,
 )
 from app.scheduler import poll_and_scan
 
@@ -416,6 +426,79 @@ async def scan_manual_odds(payload: ScanRequest) -> ScanResponse:
     results.sort(key=lambda r: (not r.verified, not r.is_arbitrage, -r.margin_percent))
     hit_rate_picks.sort(key=lambda p: -p.margin_percent)
     return ScanResponse(groups=results, hit_rate_picks=hit_rate_picks)
+
+
+_INDEPENDENCE_WARNING = (
+    "시스템 베팅은 확정 수익이 아닙니다 — 선택지들이 서로 통계적으로 독립일 때만"
+    "(보통 서로 다른 경기) 아래 적중 확률·기대값 계산이 의미가 있습니다. 같은 경기의"
+    " 서로 다른 마켓을 섞으면 실제로는 서로 영향을 주고받기 때문에 이 계산이 부정확합니다."
+)
+_NAIVE_PROBABILITY_WARNING = (
+    " 일부 선택지에 승률을 직접 입력하지 않아 배당의 역수(1/배당)를 그대로 썼습니다 —"
+    " 이건 그 배당을 매긴 북메이커 자신의 마진이 그대로 들어간 값이라, 기대수익이 항상"
+    " 0%에 가깝게 나옵니다. 진짜 기대값을 보려면 각 선택지마다 본인이 추정한 승률(%)을"
+    " 직접 입력하세요."
+)
+
+
+@router.post(
+    "/calculator/system-bet",
+    response_model=SystemBetOut,
+    dependencies=[Depends(require_api_key)],
+)
+async def calculate_system_bet(payload: SystemBetRequest) -> SystemBetOut:
+    """System bet (시스템 베팅) calculator — combines several selections
+    you assert are INDEPENDENT (normally different matches) into every
+    combination bet of a size range, rather than one all-or-nothing
+    accumulator. Given a target hit-rate %, picks the strictest minimum-
+    hits count (M) that still clears it, then reports that "System M/N"
+    bet's size, stake breakdown, and expected value.
+
+    Never a guaranteed-profit signal (see app/engine/systembet.py module
+    docstring for why, including the "probability can't be derived from
+    the same odds you're betting" trap) — always carries a warning.
+    """
+    if len(payload.legs) < 2:
+        raise HTTPException(status_code=400, detail="최소 2개 이상 선택지를 입력하세요.")
+    if len(payload.legs) > MAX_LEGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"시스템 베팅은 한 번에 최대 {MAX_LEGS}개 선택지까지만 지원합니다 (조합 수가 기하급수적으로 늘어남).",
+        )
+
+    used_naive = any(leg.probability_percent is None for leg in payload.legs)
+    legs = [
+        SystemLeg(
+            label=leg.label or f"선택{i + 1}",
+            bookmaker=leg.bookmaker or f"북메이커{i + 1}",
+            decimal_odds=leg.decimal_odds,
+            probability=(leg.probability_percent / 100.0) if leg.probability_percent is not None else 1.0 / leg.decimal_odds,
+        )
+        for i, leg in enumerate(payload.legs)
+    ]
+    probabilities = [leg.probability for leg in legs]
+
+    min_hits = max(1, smallest_min_hits_for_target(probabilities, payload.min_hit_rate_percent / 100.0))
+    achieved = poisson_binomial_at_least(probabilities, min_hits)
+    result = build_system_bet(legs, min_hits, payload.total_stake)
+
+    warning = _INDEPENDENCE_WARNING + (_NAIVE_PROBABILITY_WARNING if used_naive else "")
+
+    return SystemBetOut(
+        num_selections=result.num_selections,
+        min_hits=result.min_hits,
+        achieved_hit_rate_percent=achieved * 100.0,
+        num_bets=result.num_bets,
+        unit_stake=round(result.unit_stake, 2),
+        total_stake=result.total_stake,
+        expected_profit=round(result.expected_profit, 2),
+        expected_profit_percent=result.expected_profit_percent,
+        best_case_profit=round(result.best_case_profit, 2),
+        best_case_profit_percent=result.best_case_profit_percent,
+        breakdown=[SystemBetBreakdownItem(combo_size=size, count=count) for size, count in result.breakdown],
+        used_naive_probability=used_naive,
+        warning=warning,
+    )
 
 
 @router.get("/value-edges", response_model=list[ValueEdgeOut], dependencies=[Depends(require_api_key)])

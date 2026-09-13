@@ -122,6 +122,48 @@ class ScanResponse(BaseModel):
     hit_rate_picks: list[HitRatePickResult]
 
 
+class SystemBetLegIn(BaseModel):
+    """One selection in a system bet. ``probability_percent`` is YOUR OWN
+    estimate of its true win chance, deliberately separate from
+    ``decimal_odds`` — deriving it from the same odds (1/odds) makes the
+    expected-value math trivially collapse to breakeven no matter what
+    the odds are (see app/engine/systembet.py module docstring), so leave
+    it blank only if you understand the result will show ~0% expected
+    value rather than a real edge."""
+
+    label: str
+    bookmaker: str = ""
+    decimal_odds: float = Field(gt=1.0)
+    probability_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class SystemBetRequest(BaseModel):
+    total_stake: float = Field(gt=0)
+    min_hit_rate_percent: float = Field(ge=0.0, le=100.0)
+    legs: list[SystemBetLegIn]
+
+
+class SystemBetBreakdownItem(BaseModel):
+    combo_size: int
+    count: int
+
+
+class SystemBetOut(BaseModel):
+    num_selections: int
+    min_hits: int
+    achieved_hit_rate_percent: float
+    num_bets: int
+    unit_stake: float
+    total_stake: float
+    expected_profit: float
+    expected_profit_percent: float
+    best_case_profit: float
+    best_case_profit_percent: float
+    breakdown: list[SystemBetBreakdownItem]
+    used_naive_probability: bool
+    warning: str
+
+
 class ValueEdgeOut(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 

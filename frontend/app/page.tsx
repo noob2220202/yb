@@ -8,7 +8,10 @@ import {
   ScanLegInput,
   ScanResponse,
   StakePlan,
+  SystemBetLegInput,
+  SystemBetResult,
   ValueEdge,
+  calculateSystemBet,
   fetchOpportunities,
   fetchStakePlan,
   fetchValueEdges,
@@ -19,48 +22,107 @@ const REFRESH_MS = 15000;
 const THRESHOLD_KEY = "yb.notifyThreshold";
 const NOTIFY_KEY = "yb.notifyEnabled";
 
-interface ScanMarketOption {
+interface FixedMarketDef {
   value: string;
   label: string;
-  selections: string[] | null; // null = free-text selection (correct score, custom)
+  selections: { key: string; label: string }[];
   needsLine: boolean;
 }
 
-const SCAN_MARKETS: ScanMarketOption[] = [
-  { value: "moneyline_3way", label: "승무패 (승/무/패)", selections: ["home", "draw", "away"], needsLine: false },
-  { value: "moneyline_2way", label: "승패 (무승부 없음)", selections: ["home", "away"], needsLine: false },
-  { value: "european_handicap", label: "유럽식 핸디캡 (3-way)", selections: ["home", "draw", "away"], needsLine: true },
-  { value: "asian_handicap", label: "아시안 핸디캡 (쿼터 라인 지원)", selections: ["home", "away"], needsLine: true },
-  { value: "totals", label: "오버언더", selections: ["over", "under"], needsLine: true },
-  { value: "btts", label: "양팀득점 (BTTS)", selections: ["yes", "no"], needsLine: false },
-  { value: "correct_score", label: "정확한 스코어 (검증 안 됨)", selections: null, needsLine: false },
-  { value: "custom", label: "기타/커스텀 (검증 안 됨)", selections: null, needsLine: false },
+// 확정 수익 엔진이 검증 가능한(완전한 결과 분할이 알려진) 마켓만 고정 표로
+// 제공 — 표처럼 빈칸만 채우면 되도록, 마켓/선택지 드롭다운이 필요 없게 함.
+const FIXED_MARKETS: FixedMarketDef[] = [
+  {
+    value: "moneyline_3way",
+    label: "승무패",
+    selections: [
+      { key: "home", label: "홈" },
+      { key: "draw", label: "무" },
+      { key: "away", label: "원정" },
+    ],
+    needsLine: false,
+  },
+  {
+    value: "moneyline_2way",
+    label: "승패 (무승부 없음)",
+    selections: [
+      { key: "home", label: "홈" },
+      { key: "away", label: "원정" },
+    ],
+    needsLine: false,
+  },
+  {
+    value: "european_handicap",
+    label: "유럽식 핸디캡 (3-way)",
+    selections: [
+      { key: "home", label: "홈" },
+      { key: "draw", label: "무" },
+      { key: "away", label: "원정" },
+    ],
+    needsLine: true,
+  },
+  {
+    value: "asian_handicap",
+    label: "아시안 핸디캡 (쿼터 라인 지원)",
+    selections: [
+      { key: "home", label: "홈" },
+      { key: "away", label: "원정" },
+    ],
+    needsLine: true,
+  },
+  {
+    value: "totals",
+    label: "오버언더",
+    selections: [
+      { key: "over", label: "오버" },
+      { key: "under", label: "언더" },
+    ],
+    needsLine: true,
+  },
+  {
+    value: "btts",
+    label: "양팀득점 (BTTS)",
+    selections: [
+      { key: "yes", label: "예" },
+      { key: "no", label: "아니오" },
+    ],
+    needsLine: false,
+  },
 ];
 
-interface ScanRowState {
+interface BookRowState {
   id: number;
-  market: string;
-  customLabel: string;
-  line: string;
-  selection: string;
   bookmaker: string;
-  odds: string;
-  group: string;
+  odds: Record<string, string>; // selection key -> odds string
 }
 
-let nextScanRowId = 0;
-function makeScanRow(): ScanRowState {
-  const def = SCAN_MARKETS[0];
-  return {
-    id: nextScanRowId++,
-    market: def.value,
-    customLabel: "",
-    line: "",
-    selection: def.selections ? def.selections[0] : "",
-    bookmaker: "",
-    odds: "",
-    group: "",
-  };
+interface MarketTableState {
+  line: string;
+  rows: BookRowState[];
+}
+
+let nextRowId = 0;
+function makeBookRow(): BookRowState {
+  return { id: nextRowId++, bookmaker: "", odds: {} };
+}
+
+function makeInitialMarketState(): Record<string, MarketTableState> {
+  const state: Record<string, MarketTableState> = {};
+  for (const market of FIXED_MARKETS) {
+    state[market.value] = { line: "", rows: [makeBookRow(), makeBookRow()] };
+  }
+  return state;
+}
+
+interface FreeformRowState {
+  id: number;
+  label: string;
+  bookmaker: string;
+  odds: string;
+}
+
+function makeFreeformRow(): FreeformRowState {
+  return { id: nextRowId++, label: "", bookmaker: "", odds: "" };
 }
 
 function marketLabel(market: string, line: number | null): string {
@@ -301,33 +363,71 @@ export default function Page() {
       </section>
 
       <ManualCalculator />
+      <SystemBetTool />
     </main>
   );
 }
 
 function ManualCalculator() {
-  const [rows, setRows] = useState<ScanRowState[]>(() => [makeScanRow(), makeScanRow()]);
+  const [marketState, setMarketState] = useState<Record<string, MarketTableState>>(() => makeInitialMarketState());
+  const [freeformRows, setFreeformRows] = useState<FreeformRowState[]>(() => [makeFreeformRow(), makeFreeformRow()]);
   const [totalStake, setTotalStake] = useState(100000);
   const [minHitRate, setMinHitRate] = useState("");
   const [results, setResults] = useState<ScanResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  function updateRow(id: number, patch: Partial<ScanRowState>) {
-    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  function setLine(marketValue: string, line: string) {
+    setMarketState((prev) => ({ ...prev, [marketValue]: { ...prev[marketValue], line } }));
   }
 
-  function setRowMarket(id: number, marketValue: string) {
-    const def = SCAN_MARKETS.find((m) => m.value === marketValue) ?? SCAN_MARKETS[0];
-    updateRow(id, { market: marketValue, selection: def.selections ? def.selections[0] : "" });
+  function addBookRow(marketValue: string) {
+    setMarketState((prev) => ({
+      ...prev,
+      [marketValue]: { ...prev[marketValue], rows: [...prev[marketValue].rows, makeBookRow()] },
+    }));
   }
 
-  function addRow() {
-    setRows((prev) => [...prev, makeScanRow()]);
+  function removeBookRow(marketValue: string, rowId: number) {
+    setMarketState((prev) => {
+      const table = prev[marketValue];
+      if (table.rows.length <= 1) return prev;
+      return { ...prev, [marketValue]: { ...table, rows: table.rows.filter((r) => r.id !== rowId) } };
+    });
   }
 
-  function removeRow(id: number) {
-    setRows((prev) => (prev.length > 1 ? prev.filter((r) => r.id !== id) : prev));
+  function updateBookRow(marketValue: string, rowId: number, patch: Partial<BookRowState>) {
+    setMarketState((prev) => ({
+      ...prev,
+      [marketValue]: {
+        ...prev[marketValue],
+        rows: prev[marketValue].rows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)),
+      },
+    }));
+  }
+
+  function setCellOdds(marketValue: string, rowId: number, selectionKey: string, value: string) {
+    setMarketState((prev) => ({
+      ...prev,
+      [marketValue]: {
+        ...prev[marketValue],
+        rows: prev[marketValue].rows.map((r) =>
+          r.id === rowId ? { ...r, odds: { ...r.odds, [selectionKey]: value } } : r
+        ),
+      },
+    }));
+  }
+
+  function addFreeformRow() {
+    setFreeformRows((prev) => [...prev, makeFreeformRow()]);
+  }
+
+  function removeFreeformRow(id: number) {
+    setFreeformRows((prev) => (prev.length > 1 ? prev.filter((r) => r.id !== id) : prev));
+  }
+
+  function updateFreeformRow(id: number, patch: Partial<FreeformRowState>) {
+    setFreeformRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
 
   async function scan() {
@@ -335,36 +435,49 @@ function ManualCalculator() {
     setResults(null);
 
     const legs: ScanLegInput[] = [];
-    for (const row of rows) {
-      const def = SCAN_MARKETS.find((m) => m.value === row.market) ?? SCAN_MARKETS[0];
-      if (row.odds.trim() === "") continue; // 빈 행은 조용히 건너뜀
 
-      const odds = Number(row.odds);
-      if (!Number.isFinite(odds) || odds <= 1) {
-        setErrorMsg("배당은 1보다 큰 숫자여야 합니다.");
-        return;
-      }
-
-      const selection = row.selection.trim();
-      if (!selection) {
-        setErrorMsg("선택지를 입력하지 않은 항목이 있어요.");
-        return;
-      }
+    for (const market of FIXED_MARKETS) {
+      const table = marketState[market.value];
+      const hasAnyOdds = table.rows.some((row) => market.selections.some((s) => row.odds[s.key]?.trim()));
+      if (!hasAnyOdds) continue;
 
       let line: number | null = null;
-      if (def.needsLine) {
-        const lineValue = Number(row.line);
-        if (row.line.trim() === "" || !Number.isFinite(lineValue)) {
-          setErrorMsg(`"${def.label}" 항목에는 라인(예: 2.5, -0.25) 입력이 필요합니다.`);
+      if (market.needsLine) {
+        const lineValue = Number(table.line);
+        if (table.line.trim() === "" || !Number.isFinite(lineValue)) {
+          setErrorMsg(`"${market.label}" 표는 라인(예: 2.5, -0.25) 입력이 필요합니다.`);
           return;
         }
         line = lineValue;
       }
 
-      const marketKey = row.market === "custom" ? row.customLabel.trim() || "커스텀" : row.market;
-      const leg: ScanLegInput = { market: marketKey, line, selection, bookmaker: row.bookmaker.trim(), decimal_odds: odds };
-      if (row.group.trim()) leg.group = row.group.trim();
-      legs.push(leg);
+      for (const row of table.rows) {
+        for (const sel of market.selections) {
+          const raw = row.odds[sel.key]?.trim();
+          if (!raw) continue;
+          const odds = Number(raw);
+          if (!Number.isFinite(odds) || odds <= 1) {
+            setErrorMsg(`"${market.label}" 표에 1보다 큰 배당만 입력하세요.`);
+            return;
+          }
+          legs.push({ market: market.value, line, selection: sel.key, bookmaker: row.bookmaker.trim(), decimal_odds: odds });
+        }
+      }
+    }
+
+    for (const row of freeformRows) {
+      if (!row.odds.trim()) continue;
+      const odds = Number(row.odds);
+      if (!Number.isFinite(odds) || odds <= 1) {
+        setErrorMsg("정확한 스코어 표에 1보다 큰 배당만 입력하세요.");
+        return;
+      }
+      const label = row.label.trim();
+      if (!label) {
+        setErrorMsg("정확한 스코어 표에 선택지 이름(예: 2-1)을 입력하지 않은 항목이 있어요.");
+        return;
+      }
+      legs.push({ market: "correct_score", line: null, selection: label, bookmaker: row.bookmaker.trim(), decimal_odds: odds });
     }
 
     if (legs.length < 2) {
@@ -407,77 +520,43 @@ function ManualCalculator() {
         <h2>수동 계산기</h2>
       </div>
       <p className="hint">
-        마켓 상관없이 찾은 배당을 전부 입력하세요 — 승무패, 유럽식/아시안 핸디캡(쿼터 라인
-        포함), 오버언더, 양팀득점, 정확한 스코어, 기타 커스텀까지 한 번에 넣으면 그중 확정
-        수익(100% 마진)이 나는 조합을 찾아 보여드립니다. 같은 마켓·라인끼리는 자동으로
-        묶이고, <strong>서로 다른 마켓을 일부러 같이 묶어보고 싶으면</strong> "그룹"란에
-        같은 이름을 적어주세요 (단, 서로 다른 마켓은 대부분 결과가 통계적으로 독립이 아니라
-        묶은 결과가 검증되지는 않아요 — 결과 카드에 이유가 표시됩니다).{" "}
-        <strong>한 경기 분량만</strong> 넣어주세요 — 여러 경기를 섞으면 그룹이 잘못 묶여요.
+        마켓별 표에 배당만 채워 넣으세요 — 북메이커별로 행을 추가해서 비교할 수 있습니다.
+        같은 마켓·라인 안에서 확정 수익(100% 마진)이 나는 조합을 찾아 보여드립니다.{" "}
+        <strong>한 경기 분량만</strong> 채워주세요.
       </p>
 
-      <div className="pick-box calc-box">
-        <div className="scan-rows">
-          {rows.map((row) => {
-            const def = SCAN_MARKETS.find((m) => m.value === row.market) ?? SCAN_MARKETS[0];
-            return (
-              <div className="scan-row" key={row.id}>
-                <select value={row.market} onChange={(e) => setRowMarket(row.id, e.target.value)}>
-                  {SCAN_MARKETS.map((m) => (
-                    <option key={m.value} value={m.value}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
+      <div className="market-tables">
+        {FIXED_MARKETS.map((market) => (
+          <MarketTable
+            key={market.value}
+            market={market}
+            table={marketState[market.value]}
+            onLineChange={(line) => setLine(market.value, line)}
+            onAddRow={() => addBookRow(market.value)}
+            onRemoveRow={(rowId) => removeBookRow(market.value, rowId)}
+            onBookmakerChange={(rowId, bookmaker) => updateBookRow(market.value, rowId, { bookmaker })}
+            onOddsChange={(rowId, key, value) => setCellOdds(market.value, rowId, key, value)}
+          />
+        ))}
 
+        <div className="pick-box calc-box">
+          <div className="market-table-head">
+            <h3>정확한 스코어 (검증 안 됨)</h3>
+          </div>
+          <div className="freeform-rows">
+            {freeformRows.map((row) => (
+              <div className="freeform-row" key={row.id}>
                 <input
                   type="text"
-                  placeholder="그룹 (선택, 같은 이름끼리 묶임)"
-                  value={row.group}
-                  onChange={(e) => updateRow(row.id, { group: e.target.value })}
+                  placeholder="스코어 (예: 2-1)"
+                  value={row.label}
+                  onChange={(e) => updateFreeformRow(row.id, { label: e.target.value })}
                 />
-
-                {row.market === "custom" && (
-                  <input
-                    type="text"
-                    placeholder="마켓 이름 (예: 코너킥 오버 9.5)"
-                    value={row.customLabel}
-                    onChange={(e) => updateRow(row.id, { customLabel: e.target.value })}
-                  />
-                )}
-
-                {def.needsLine && (
-                  <input
-                    type="number"
-                    step={0.25}
-                    placeholder="라인"
-                    value={row.line}
-                    onChange={(e) => updateRow(row.id, { line: e.target.value })}
-                  />
-                )}
-
-                {def.selections ? (
-                  <select value={row.selection} onChange={(e) => updateRow(row.id, { selection: e.target.value })}>
-                    {def.selections.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    placeholder="선택지 (예: 2-1)"
-                    value={row.selection}
-                    onChange={(e) => updateRow(row.id, { selection: e.target.value })}
-                  />
-                )}
-
                 <input
                   type="text"
                   placeholder="북메이커"
                   value={row.bookmaker}
-                  onChange={(e) => updateRow(row.id, { bookmaker: e.target.value })}
+                  onChange={(e) => updateFreeformRow(row.id, { bookmaker: e.target.value })}
                 />
                 <input
                   type="number"
@@ -485,59 +564,54 @@ function ManualCalculator() {
                   min={1.01}
                   placeholder="배당"
                   value={row.odds}
-                  onChange={(e) => updateRow(row.id, { odds: e.target.value })}
+                  onChange={(e) => updateFreeformRow(row.id, { odds: e.target.value })}
                 />
                 <button
                   type="button"
                   className="scan-row-remove"
-                  onClick={() => removeRow(row.id)}
-                  disabled={rows.length <= 1}
+                  onClick={() => removeFreeformRow(row.id)}
+                  disabled={freeformRows.length <= 1}
                   aria-label="항목 삭제"
                 >
                   ✕
                 </button>
               </div>
-            );
-          })}
-        </div>
-
-        <div className="scan-actions">
-          <button className="btn secondary" onClick={addRow} type="button">
-            + 항목 추가
-          </button>
-          <label className="calc-field">
-            <span>총 베팅 금액</span>
-            <input
-              type="number"
-              min={1}
-              value={totalStake}
-              onChange={(e) => setTotalStake(Number(e.target.value))}
-            />
-          </label>
-          <label className="calc-field">
-            <span>목표 적중률 % (선택)</span>
-            <input
-              type="number"
-              min={0}
-              max={100}
-              step={1}
-              placeholder="예: 70"
-              value={minHitRate}
-              onChange={(e) => setMinHitRate(e.target.value)}
-            />
-          </label>
-          <button className="btn" onClick={scan} disabled={loading}>
-            {loading ? "계산 중…" : "확정 수익 찾기"}
+            ))}
+          </div>
+          <button className="btn secondary" type="button" onClick={addFreeformRow}>
+            + 스코어 추가
           </button>
         </div>
-
-        {errorMsg && <div className="calc-error">{errorMsg}</div>}
       </div>
+
+      <div className="scan-actions">
+        <label className="calc-field">
+          <span>총 베팅 금액</span>
+          <input type="number" min={1} value={totalStake} onChange={(e) => setTotalStake(Number(e.target.value))} />
+        </label>
+        <label className="calc-field">
+          <span>목표 적중률 % (선택)</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            placeholder="예: 70"
+            value={minHitRate}
+            onChange={(e) => setMinHitRate(e.target.value)}
+          />
+        </label>
+        <button className="btn" onClick={scan} disabled={loading}>
+          {loading ? "계산 중…" : "확정 수익 찾기"}
+        </button>
+      </div>
+
+      {errorMsg && <div className="calc-error">{errorMsg}</div>}
 
       {results !== null && (
         <div className="scan-results">
           {results.groups.length === 0 ? (
-            <div className="empty">계산할 그룹이 없어요 — 같은 마켓·라인에 최소 2개 이상 입력하세요.</div>
+            <div className="empty">계산할 그룹이 없어요 — 같은 표에 최소 2개 이상 배당을 입력하세요.</div>
           ) : (
             <div className="pick-grid">
               {results.groups.map((group, i) => (
@@ -564,6 +638,327 @@ function ManualCalculator() {
               </div>
             </div>
           )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MarketTable({
+  market,
+  table,
+  onLineChange,
+  onAddRow,
+  onRemoveRow,
+  onBookmakerChange,
+  onOddsChange,
+}: {
+  market: FixedMarketDef;
+  table: MarketTableState;
+  onLineChange: (line: string) => void;
+  onAddRow: () => void;
+  onRemoveRow: (rowId: number) => void;
+  onBookmakerChange: (rowId: number, bookmaker: string) => void;
+  onOddsChange: (rowId: number, selectionKey: string, value: string) => void;
+}) {
+  return (
+    <div className="pick-box calc-box">
+      <div className="market-table-head">
+        <h3>{market.label}</h3>
+        {market.needsLine && (
+          <input
+            className="market-line-input"
+            type="number"
+            step={0.25}
+            placeholder="라인 (예: 2.5, -0.25)"
+            value={table.line}
+            onChange={(e) => onLineChange(e.target.value)}
+          />
+        )}
+      </div>
+
+      <div className="market-grid-scroll">
+        <div className={`market-grid market-grid-${market.selections.length}col`}>
+          <div className="market-grid-header">북메이커</div>
+          {market.selections.map((s) => (
+            <div className="market-grid-header" key={s.key}>
+              {s.label}
+            </div>
+          ))}
+          <div />
+
+          {table.rows.map((row) => (
+            <div className="market-grid-row" key={row.id}>
+              <input
+                type="text"
+                placeholder="북메이커"
+                value={row.bookmaker}
+                onChange={(e) => onBookmakerChange(row.id, e.target.value)}
+              />
+              {market.selections.map((s) => (
+                <input
+                  key={s.key}
+                  type="number"
+                  step={0.01}
+                  min={1.01}
+                  placeholder="배당"
+                  value={row.odds[s.key] ?? ""}
+                  onChange={(e) => onOddsChange(row.id, s.key, e.target.value)}
+                />
+              ))}
+              <button
+                type="button"
+                className="scan-row-remove"
+                onClick={() => onRemoveRow(row.id)}
+                disabled={table.rows.length <= 1}
+                aria-label="북메이커 삭제"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <button className="btn secondary" type="button" onClick={onAddRow}>
+        + 북메이커 추가
+      </button>
+    </div>
+  );
+}
+
+interface SystemLegRowState {
+  id: number;
+  label: string;
+  bookmaker: string;
+  odds: string;
+  probability: string;
+}
+
+let nextSystemRowId = 0;
+function makeSystemLegRow(): SystemLegRowState {
+  return { id: nextSystemRowId++, label: "", bookmaker: "", odds: "", probability: "" };
+}
+
+function SystemBetTool() {
+  const [rows, setRows] = useState<SystemLegRowState[]>(() => [
+    makeSystemLegRow(),
+    makeSystemLegRow(),
+    makeSystemLegRow(),
+  ]);
+  const [totalStake, setTotalStake] = useState(100000);
+  const [minHitRate, setMinHitRate] = useState("70");
+  const [result, setResult] = useState<SystemBetResult | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  function updateRow(id: number, patch: Partial<SystemLegRowState>) {
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+
+  function addRow() {
+    setRows((prev) => [...prev, makeSystemLegRow()]);
+  }
+
+  function removeRow(id: number) {
+    setRows((prev) => (prev.length > 1 ? prev.filter((r) => r.id !== id) : prev));
+  }
+
+  async function calculate() {
+    setErrorMsg(null);
+    setResult(null);
+
+    const legs: SystemBetLegInput[] = [];
+    for (const row of rows) {
+      if (!row.odds.trim()) continue;
+      const odds = Number(row.odds);
+      if (!Number.isFinite(odds) || odds <= 1) {
+        setErrorMsg("배당은 1보다 큰 숫자여야 합니다.");
+        return;
+      }
+      let probability: number | null = null;
+      if (row.probability.trim()) {
+        probability = Number(row.probability);
+        if (!Number.isFinite(probability) || probability < 0 || probability > 100) {
+          setErrorMsg("승률은 0~100 사이 숫자여야 합니다.");
+          return;
+        }
+      }
+      legs.push({
+        label: row.label.trim() || `선택${legs.length + 1}`,
+        bookmaker: row.bookmaker.trim(),
+        decimal_odds: odds,
+        probability_percent: probability,
+      });
+    }
+
+    if (legs.length < 2) {
+      setErrorMsg("최소 2개 이상 선택지를 입력하세요.");
+      return;
+    }
+    if (!Number.isFinite(totalStake) || totalStake <= 0) {
+      setErrorMsg("총 베팅 금액은 0보다 커야 합니다.");
+      return;
+    }
+    const hitRate = Number(minHitRate);
+    if (minHitRate.trim() === "" || !Number.isFinite(hitRate) || hitRate < 0 || hitRate > 100) {
+      setErrorMsg("목표 적중률은 0~100 사이 숫자여야 합니다.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await calculateSystemBet({ total_stake: totalStake, min_hit_rate_percent: hitRate, legs });
+      setResult(res);
+    } catch (err) {
+      setErrorMsg((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section>
+      <div className="section-head">
+        <h2>시스템 베팅</h2>
+      </div>
+      <p className="hint">
+        서로 <strong>독립적인</strong> 선택지(보통 서로 다른 경기)를 조합해 "N개 중 M개 이상
+        적중" 시스템 베팅을 계산합니다. 확정 수익이 아니라 기대값(EV) 기반이며, 승률을
+        직접 입력해야 의미 있는 기대수익이 나옵니다 — 배당만 넣으면 그 배당 자체의
+        마진이 그대로 반영돼 기대수익이 항상 0%에 가깝게 나옵니다 (배당의 역수를 확률로
+        쓰는 건 순환 논리라서요). <strong>같은 경기의 서로 다른 마켓을 섞지 마세요</strong> —
+        승패와 오버언더처럼 서로 영향을 주는 마켓은 이 계산이 부정확해집니다.
+      </p>
+
+      <div className="pick-box calc-box">
+        <div className="system-rows">
+          <div className="system-grid-header-row">
+            <span>선택 이름</span>
+            <span>북메이커</span>
+            <span>배당</span>
+            <span>내 예상 승률 %(선택)</span>
+            <span />
+          </div>
+          {rows.map((row) => (
+            <div className="system-row" key={row.id}>
+              <input
+                type="text"
+                placeholder="예: A팀 승"
+                value={row.label}
+                onChange={(e) => updateRow(row.id, { label: e.target.value })}
+              />
+              <input
+                type="text"
+                placeholder="북메이커"
+                value={row.bookmaker}
+                onChange={(e) => updateRow(row.id, { bookmaker: e.target.value })}
+              />
+              <input
+                type="number"
+                step={0.01}
+                min={1.01}
+                placeholder="배당"
+                value={row.odds}
+                onChange={(e) => updateRow(row.id, { odds: e.target.value })}
+              />
+              <input
+                type="number"
+                step={1}
+                min={0}
+                max={100}
+                placeholder="예: 55"
+                value={row.probability}
+                onChange={(e) => updateRow(row.id, { probability: e.target.value })}
+              />
+              <button
+                type="button"
+                className="scan-row-remove"
+                onClick={() => removeRow(row.id)}
+                disabled={rows.length <= 1}
+                aria-label="선택지 삭제"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <button className="btn secondary" type="button" onClick={addRow}>
+          + 선택지 추가
+        </button>
+
+        <div className="scan-actions">
+          <label className="calc-field">
+            <span>총 베팅 금액</span>
+            <input type="number" min={1} value={totalStake} onChange={(e) => setTotalStake(Number(e.target.value))} />
+          </label>
+          <label className="calc-field">
+            <span>목표 적중률 %</span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={minHitRate}
+              onChange={(e) => setMinHitRate(e.target.value)}
+            />
+          </label>
+          <button className="btn" onClick={calculate} disabled={loading}>
+            {loading ? "계산 중…" : "시스템 계산하기"}
+          </button>
+        </div>
+
+        {errorMsg && <div className="calc-error">{errorMsg}</div>}
+      </div>
+
+      {result && (
+        <div className="pick-box value-tone system-result">
+          <div className="pick-top">
+            <div>
+              <div className="pick-event">
+                시스템 {result.min_hits}/{result.num_selections}
+              </div>
+              <div className="pick-meta">
+                <span>적중률 {result.achieved_hit_rate_percent.toFixed(1)}%</span>
+                <span>·</span>
+                <span>{result.num_bets}건 베팅 · 건당 {result.unit_stake.toFixed(0)}</span>
+              </div>
+            </div>
+            <div className="pick-margin">
+              <div className={`num small${result.expected_profit_percent < 0 ? " calc-loss-num" : ""}`}>
+                {result.expected_profit_percent >= 0 ? "+" : ""}
+                {result.expected_profit_percent.toFixed(2)}%
+              </div>
+              <div className="cap">기대 수익률</div>
+            </div>
+          </div>
+
+          <p className="hint scan-warning">{result.warning}</p>
+
+          <table className="stake-table">
+            <thead>
+              <tr>
+                <th>조합 크기</th>
+                <th>베팅 수</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.breakdown.map((b) => (
+                <tr key={b.combo_size}>
+                  <td>{b.combo_size}개 조합</td>
+                  <td>{b.count}건</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="pick-actions">
+            <span className="badge not-guaranteed">확정 아님 · EV 기반</span>
+            <span className="scan-profit">
+              전체 적중 시 <strong>{result.best_case_profit.toFixed(0)}</strong> ({result.best_case_profit_percent.toFixed(1)}%)
+            </span>
+          </div>
         </div>
       )}
     </section>

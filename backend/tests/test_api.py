@@ -361,3 +361,98 @@ def test_scan_hit_rate_never_computed_for_unverified_groups(api_client):
     )
     assert resp.status_code == 200
     assert resp.json()["hit_rate_picks"] == []
+
+
+# ---------------------------------------------------------------------
+# /calculator/system-bet: combining INDEPENDENT selections (typically
+# different matches) into a System M/N bet.
+# ---------------------------------------------------------------------
+
+
+def test_system_bet_requires_api_key(api_client):
+    resp = api_client.post(
+        "/calculator/system-bet",
+        json={
+            "total_stake": 1000,
+            "min_hit_rate_percent": 50,
+            "legs": [
+                {"label": "A win", "decimal_odds": 2.0},
+                {"label": "B win", "decimal_odds": 2.0},
+            ],
+        },
+    )
+    assert resp.status_code in (401, 422)
+
+
+def test_system_bet_builds_a_yankee_style_system(api_client):
+    resp = api_client.post(
+        "/calculator/system-bet",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 11000,
+            "min_hit_rate_percent": 1,  # trivially low -> picks the strictest M that still clears it
+            "legs": [
+                {"label": "A win", "bookmaker": "X", "decimal_odds": 2.0, "probability_percent": 60},
+                {"label": "B win", "bookmaker": "Y", "decimal_odds": 2.0, "probability_percent": 60},
+                {"label": "C win", "bookmaker": "Z", "decimal_odds": 2.0, "probability_percent": 60},
+                {"label": "D win", "bookmaker": "W", "decimal_odds": 2.0, "probability_percent": 60},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["num_selections"] == 4
+    # A near-0% target picks the strictest system that still trivially
+    # clears it -- with 4 independent 60%-chance legs, that's "all 4"
+    # (min_hits=4), a single bet.
+    assert body["min_hits"] == 4
+    assert body["num_bets"] == 1
+    assert body["used_naive_probability"] is False
+    assert "확정 수익이 아닙니다" in body["warning"]
+
+
+def test_system_bet_naive_probability_defaults_to_implied_and_flags_it(api_client):
+    resp = api_client.post(
+        "/calculator/system-bet",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 10000,
+            "min_hit_rate_percent": 50,
+            "legs": [
+                {"label": "A", "decimal_odds": 2.0},
+                {"label": "B", "decimal_odds": 2.0},
+                {"label": "C", "decimal_odds": 2.0},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["used_naive_probability"] is True
+    assert body["expected_profit_percent"] == pytest.approx(0.0, abs=1e-4)
+    assert "배당의 역수" in body["warning"]
+
+
+def test_system_bet_rejects_too_few_legs(api_client):
+    resp = api_client.post(
+        "/calculator/system-bet",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 1000,
+            "min_hit_rate_percent": 50,
+            "legs": [{"label": "A", "decimal_odds": 2.0}],
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_system_bet_rejects_too_many_legs(api_client):
+    resp = api_client.post(
+        "/calculator/system-bet",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 1000,
+            "min_hit_rate_percent": 50,
+            "legs": [{"label": f"L{i}", "decimal_odds": 2.0} for i in range(20)],
+        },
+    )
+    assert resp.status_code == 400
