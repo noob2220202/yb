@@ -158,39 +158,62 @@ async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
     POOL of odds across as many markets as you want, all for ONE match
     (moneyline, European 3-way handicap, Asian handicap incl. quarter
     lines, totals, BTTS, correct score, or any custom label you type),
-    groups them by (market, line), and reports every group's margin so
-    you can see which combination(s) among everything you entered
-    actually clears 100% (``is_arbitrage``).
+    groups them (by (market, line), or by an explicit ``group`` string a
+    leg supplies to force it to be pooled with legs from a DIFFERENT
+    market), and reports every group's margin so you can see which
+    combination(s) among everything you entered actually clears 100%
+    (``is_arbitrage``).
 
-    Two tiers, always reported separately, never conflated:
+    Three tiers, always reported separately, never conflated:
 
     - ``verified=True``: a recognized clean-partition market with EXACTLY
       its required selections present. Priced by the same engine used for
       real detected opportunities — a genuine, checked guarantee when
       ``is_arbitrage`` is true.
-    - ``verified=False``: everything else (correct_score, a custom label,
-      or a known market missing/duplicating a required selection). Still
-      sums 1/odds and reports a margin, but this is only a TRUE guarantee
-      if your own entries already cover every possible outcome of that
-      market — something this tool cannot check for an open-ended market
-      like correct score. Always carries an explanatory ``warning``.
+    - ``verified=False`` (open-ended market): correct_score, a custom
+      label, or a known market missing/duplicating a required selection.
+      Still sums 1/odds and reports a margin, but it's only a TRUE
+      guarantee if your own entries already cover every possible outcome
+      — something this tool can't check for an open-ended market.
+    - ``verified=False`` (mixed markets): a ``group`` was used to force
+      legs from genuinely different markets together (e.g. a moneyline
+      leg with a totals leg). These are almost never statistically
+      independent (winning and total goals correlate), so multiplying/
+      summing their raw odds together is NOT a valid arbitrage check —
+      only real, honest if you priced the actual combined market a
+      bookmaker sells (e.g. "Home win & Over 2.5" as its own single
+      quote), never by combining two separate markets' odds yourself.
+
+    Every case always carries an explanatory ``warning`` except the
+    fully engine-verified one.
     """
-    groups: dict[tuple[str, float | None], list] = defaultdict(list)
+    groups: dict[str, list] = defaultdict(list)
     for leg in payload.legs:
-        groups[(leg.market, leg.line)].append(leg)
+        key = (leg.group or "").strip() or f"{leg.market}:{leg.line}"
+        groups[key].append(leg)
 
     results: list[ScanGroupResult] = []
-    for (market_str, line), group_legs in groups.items():
-        market: MarketType | None
-        try:
-            market = MarketType(market_str)
-        except ValueError:
-            market = None
+    for key, group_legs in groups.items():
+        market_values = {leg.market for leg in group_legs}
+        line_values = {leg.line for leg in group_legs}
+        uniform_market = len(market_values) == 1
+        uniform_line = len(line_values) == 1
+        market_str = next(iter(market_values)) if uniform_market else key
+        line = next(iter(line_values)) if uniform_line else None
+
+        market: MarketType | None = None
+        if uniform_market:
+            try:
+                market = MarketType(market_str)
+            except ValueError:
+                market = None
 
         required = expected_selections(market) if market is not None else frozenset()
         got_selections = [leg.selection for leg in group_legs]
         is_verifiable = (
-            market is not None
+            uniform_market
+            and uniform_line
+            and market is not None
             and bool(required)
             and set(got_selections) == set(required)
             and len(got_selections) == len(required)
@@ -254,7 +277,15 @@ async def scan_manual_odds(payload: ScanRequest) -> list[ScanGroupResult]:
             )
         guaranteed_profit = payload.total_stake * (1.0 / total_implied - 1.0)
 
-        if market is not None and required:
+        if not uniform_market:
+            warning = (
+                "서로 다른 마켓을 한 그룹으로 묶었습니다 — 승패·오버언더처럼 서로 다른 "
+                "마켓의 결과는 대부분 통계적으로 독립이 아니라서(예: 이기는 팀과 총 득점은 "
+                "서로 영향을 줌), 각각의 배당을 그대로 묶어서 계산한 이 숫자는 확정 수익이 "
+                "아닙니다. 북메이커가 실제로 파는 결합 마켓(예: '홈팀 승리 & 오버 2.5')의 "
+                "가격을 그 자체로 하나의 배당으로 넣었을 때만 이 숫자가 의미를 가집니다."
+            )
+        elif market is not None and required:
             warning = (
                 f"이 마켓에는 다음 선택지가 정확히 하나씩 필요합니다: {sorted(required)} "
                 f"(지금 입력: {sorted(set(got_selections))}) — 부족하거나 중복된 채로는 "

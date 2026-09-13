@@ -43,6 +43,7 @@ interface ScanRowState {
   selection: string;
   bookmaker: string;
   odds: string;
+  group: string;
 }
 
 let nextScanRowId = 0;
@@ -56,6 +57,7 @@ function makeScanRow(): ScanRowState {
     selection: def.selections ? def.selections[0] : "",
     bookmaker: "",
     odds: "",
+    group: "",
   };
 }
 
@@ -357,7 +359,9 @@ function ManualCalculator() {
       }
 
       const marketKey = row.market === "custom" ? row.customLabel.trim() || "커스텀" : row.market;
-      legs.push({ market: marketKey, line, selection, bookmaker: row.bookmaker.trim(), decimal_odds: odds });
+      const leg: ScanLegInput = { market: marketKey, line, selection, bookmaker: row.bookmaker.trim(), decimal_odds: odds };
+      if (row.group.trim()) leg.group = row.group.trim();
+      legs.push(leg);
     }
 
     if (legs.length < 2) {
@@ -388,8 +392,11 @@ function ManualCalculator() {
       <p className="hint">
         마켓 상관없이 찾은 배당을 전부 입력하세요 — 승무패, 유럽식/아시안 핸디캡(쿼터 라인
         포함), 오버언더, 양팀득점, 정확한 스코어, 기타 커스텀까지 한 번에 넣으면 그중 확정
-        수익(100% 마진)이 나는 조합을 찾아 보여드립니다. <strong>한 경기 분량만</strong>{" "}
-        넣어주세요 — 여러 경기를 섞으면 그룹이 잘못 묶여요.
+        수익(100% 마진)이 나는 조합을 찾아 보여드립니다. 같은 마켓·라인끼리는 자동으로
+        묶이고, <strong>서로 다른 마켓을 일부러 같이 묶어보고 싶으면</strong> "그룹"란에
+        같은 이름을 적어주세요 (단, 서로 다른 마켓은 대부분 결과가 통계적으로 독립이 아니라
+        묶은 결과가 검증되지는 않아요 — 결과 카드에 이유가 표시됩니다).{" "}
+        <strong>한 경기 분량만</strong> 넣어주세요 — 여러 경기를 섞으면 그룹이 잘못 묶여요.
       </p>
 
       <div className="pick-box calc-box">
@@ -405,6 +412,13 @@ function ManualCalculator() {
                     </option>
                   ))}
                 </select>
+
+                <input
+                  type="text"
+                  placeholder="그룹 (선택, 같은 이름끼리 묶임)"
+                  value={row.group}
+                  onChange={(e) => updateRow(row.id, { group: e.target.value })}
+                />
 
                 {row.market === "custom" && (
                   <input

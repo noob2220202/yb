@@ -581,7 +581,7 @@ section > p.hint {
 
 .scan-row {
   display: grid;
-  grid-template-columns: 1.3fr 1fr 1fr 1fr 100px 32px;
+  grid-template-columns: 1.2fr 1fr 0.9fr 0.9fr 0.9fr 100px 32px;
   gap: var(--sp-2);
   align-items: center;
 }

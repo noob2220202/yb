@@ -47,13 +47,21 @@ class ScanLegIn(BaseModel):
     which get the fully engine-verified treatment, quarter lines included
     -- or ANY other string (``correct_score``, a custom label like "코너킥
     오버 9.5", ...), which is grouped and summed but explicitly marked
-    unverified in the response (see ``ScanGroupResult.verified``)."""
+    unverified in the response (see ``ScanGroupResult.verified``).
+
+    ``group`` optionally overrides which other legs this one gets pooled
+    with for the arbitrage check -- default grouping is by (market, line),
+    so give two legs from otherwise-different markets the same ``group``
+    string to force them into one combined calculation (e.g. mixing a
+    moneyline leg with a totals leg). Always unverified when it mixes
+    different market types -- see the endpoint docstring for why."""
 
     market: str
     line: float | None = None
     selection: str
     bookmaker: str = ""
     decimal_odds: float = Field(gt=1.0)
+    group: str | None = None
 
 
 class ScanRequest(BaseModel):

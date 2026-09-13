@@ -41,6 +41,7 @@ export interface ScanLegInput {
   selection: string;
   bookmaker: string;
   decimal_odds: number;
+  group?: string;
 }
 
 export interface ScanRequest {

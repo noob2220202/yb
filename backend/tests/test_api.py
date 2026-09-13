@@ -241,6 +241,30 @@ def test_scan_marks_missing_selection_as_unverified_with_a_warning(api_client):
     assert body[0]["total_implied_probability"] == pytest.approx(0.2)
 
 
+def test_scan_group_field_mixes_different_markets_and_marks_unverified(api_client):
+    """A shared ``group`` string forces legs from genuinely different
+    markets (moneyline + totals here) into one combined calculation --
+    always unverified, with a warning about correlation, never silently
+    treated as a real arbitrage."""
+    resp = api_client.post(
+        "/calculator/scan",
+        headers={"x-api-key": "test-key"},
+        json={
+            "total_stake": 1000,
+            "legs": [
+                {"market": "moneyline_2way", "selection": "home", "bookmaker": "A", "decimal_odds": 3.0, "group": "mix1"},
+                {"market": "totals", "line": 2.5, "selection": "over", "bookmaker": "B", "decimal_odds": 3.0, "group": "mix1"},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["verified"] is False
+    assert "독립이 아니" in body[0]["warning"]
+    assert len(body[0]["legs"]) == 2
+
+
 def test_scan_marks_correct_score_and_custom_markets_as_unverified(api_client):
     resp = api_client.post(
         "/calculator/scan",
